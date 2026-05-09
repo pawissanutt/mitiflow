@@ -3,11 +3,16 @@
 //! These tests start a real orchestrator with HTTP server enabled,
 //! then use an HTTP client to exercise the REST endpoints.
 
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use serde_json::{Value, json};
 
+use mitiflow::MitiflowDomain;
 use mitiflow_orchestrator::orchestrator::{Orchestrator, OrchestratorConfig};
+
+static HTTP_START_MUTEX: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 /// Wrap a test body in a timeout to prevent hangs.
 macro_rules! with_timeout {
@@ -18,27 +23,23 @@ macro_rules! with_timeout {
     };
 }
 
-/// Unique key prefix per test to avoid cross-talk.
-fn key_prefix(test: &str) -> String {
-    format!("test/e2e_http_{test}_{}", uuid::Uuid::now_v7())
-}
-
 /// Find a free TCP port.
 async fn free_port() -> u16 {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     listener.local_addr().unwrap().port()
 }
 
-/// Start an orchestrator with HTTP enabled on a random port. Returns (orchestrator, base_url).
+/// Start an orchestrator with HTTP enabled on a random port. Returns (orchestrator, domain, base_url, tempdir).
 async fn start_orch_with_http(
     test_name: &str,
-) -> (Orchestrator, zenoh::Session, String, tempfile::TempDir) {
+) -> (Orchestrator, MitiflowDomain, String, tempfile::TempDir) {
+    let http_start_guard = HTTP_START_MUTEX.lock().await;
     let port = free_port().await;
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test(test_name).await.unwrap();
     let dir = tempfile::tempdir().unwrap();
 
     let config = OrchestratorConfig {
-        key_prefix: key_prefix(test_name),
+        key_prefix: domain.namespace().root().to_string(),
         data_dir: dir.path().to_path_buf(),
         lag_interval: Duration::from_secs(60),
         admin_prefix: None,
@@ -47,14 +48,15 @@ async fn start_orch_with_http(
         bootstrap_topics_from: None,
     };
 
-    let mut orch = Orchestrator::new(&session, config).unwrap();
+    let mut orch = Orchestrator::new(domain.session(), config).unwrap();
     orch.run().await.unwrap();
 
     // Give the HTTP server a moment to start
     tokio::time::sleep(Duration::from_millis(100)).await;
+    drop(http_start_guard);
 
     let base_url = format!("http://127.0.0.1:{port}");
-    (orch, session, base_url, dir)
+    (orch, domain, base_url, dir)
 }
 
 // =========================================================================
@@ -64,13 +66,13 @@ async fn start_orch_with_http(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_http_health() {
     with_timeout!({
-        let (orch, session, url, _dir) = start_orch_with_http("health").await;
+        let (orch, domain, url, _dir) = start_orch_with_http("e2e_http_health").await;
 
         let resp = reqwest::get(format!("{url}/api/v1/health")).await.unwrap();
         assert_eq!(resp.status(), 200);
 
         orch.shutdown().await;
-        session.close().await.unwrap();
+        domain.shutdown().await.unwrap();
     });
 }
 
@@ -81,7 +83,7 @@ async fn e2e_http_health() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_http_topic_crud() {
     with_timeout!({
-        let (orch, session, url, _dir) = start_orch_with_http("topic_crud").await;
+        let (orch, domain, url, _dir) = start_orch_with_http("e2e_http_topic_crud").await;
         let client = reqwest::Client::new();
 
         // List topics: empty
@@ -161,7 +163,7 @@ async fn e2e_http_topic_crud() {
         assert!(topics.is_empty());
 
         orch.shutdown().await;
-        session.close().await.unwrap();
+        domain.shutdown().await.unwrap();
     });
 }
 
@@ -172,7 +174,7 @@ async fn e2e_http_topic_crud() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_http_topic_not_found() {
     with_timeout!({
-        let (orch, session, url, _dir) = start_orch_with_http("topic_nf").await;
+        let (orch, domain, url, _dir) = start_orch_with_http("e2e_http_topic_nf").await;
         let client = reqwest::Client::new();
 
         let resp = client
@@ -190,7 +192,7 @@ async fn e2e_http_topic_not_found() {
         assert_eq!(resp.status(), 404);
 
         orch.shutdown().await;
-        session.close().await.unwrap();
+        domain.shutdown().await.unwrap();
     });
 }
 
@@ -201,7 +203,7 @@ async fn e2e_http_topic_not_found() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_http_cluster_endpoints() {
     with_timeout!({
-        let (orch, session, url, _dir) = start_orch_with_http("cluster").await;
+        let (orch, domain, url, _dir) = start_orch_with_http("e2e_http_cluster").await;
         let client = reqwest::Client::new();
 
         // Cluster nodes
@@ -231,7 +233,7 @@ async fn e2e_http_cluster_endpoints() {
         assert_eq!(resp.status(), 200);
 
         orch.shutdown().await;
-        session.close().await.unwrap();
+        domain.shutdown().await.unwrap();
     });
 }
 
@@ -242,10 +244,13 @@ async fn e2e_http_cluster_endpoints() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_http_auth_required() {
     with_timeout!({
+        let http_start_guard = HTTP_START_MUTEX.lock().await;
         let port = free_port().await;
-        let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+        let domain = MitiflowDomain::isolated_for_test("e2e_http_auth")
+            .await
+            .unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let prefix = key_prefix("auth");
+        let prefix = domain.namespace().root().to_string();
 
         let config = OrchestratorConfig {
             key_prefix: prefix,
@@ -257,9 +262,10 @@ async fn e2e_http_auth_required() {
             bootstrap_topics_from: None,
         };
 
-        let mut orch = Orchestrator::new(&session, config).unwrap();
+        let mut orch = Orchestrator::new(domain.session(), config).unwrap();
         orch.run().await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(http_start_guard);
 
         let client = reqwest::Client::new();
         let url = format!("http://127.0.0.1:{port}");
@@ -299,7 +305,7 @@ async fn e2e_http_auth_required() {
         assert_eq!(resp.status(), 200, "should accept correct token");
 
         orch.shutdown().await;
-        session.close().await.unwrap();
+        domain.shutdown().await.unwrap();
     });
 }
 
@@ -310,7 +316,7 @@ async fn e2e_http_auth_required() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_http_sse_cluster_stream() {
     with_timeout!({
-        let (orch, session, url, _dir) = start_orch_with_http("sse_cluster").await;
+        let (orch, domain, url, _dir) = start_orch_with_http("e2e_http_sse_cluster").await;
         let client = reqwest::Client::new();
 
         let resp = client
@@ -333,14 +339,14 @@ async fn e2e_http_sse_cluster_stream() {
         drop(client);
 
         orch.shutdown().await;
-        session.close().await.unwrap();
+        domain.shutdown().await.unwrap();
     });
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_http_sse_events_stream() {
     with_timeout!({
-        let (orch, session, url, _dir) = start_orch_with_http("sse_events").await;
+        let (orch, domain, url, _dir) = start_orch_with_http("e2e_http_sse_events").await;
         let client = reqwest::Client::new();
 
         let resp = client
@@ -361,7 +367,7 @@ async fn e2e_http_sse_events_stream() {
         drop(client);
 
         orch.shutdown().await;
-        session.close().await.unwrap();
+        domain.shutdown().await.unwrap();
     });
 }
 
@@ -372,7 +378,7 @@ async fn e2e_http_sse_events_stream() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_http_consumer_groups_empty() {
     with_timeout!({
-        let (orch, session, url, _dir) = start_orch_with_http("cg_empty").await;
+        let (orch, domain, url, _dir) = start_orch_with_http("e2e_http_cg_empty").await;
         let client = reqwest::Client::new();
 
         let resp = client
@@ -385,7 +391,7 @@ async fn e2e_http_consumer_groups_empty() {
         assert!(groups.is_empty());
 
         orch.shutdown().await;
-        session.close().await.unwrap();
+        domain.shutdown().await.unwrap();
     });
 }
 
@@ -396,7 +402,7 @@ async fn e2e_http_consumer_groups_empty() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_http_topic_partitions() {
     with_timeout!({
-        let (orch, session, url, _dir) = start_orch_with_http("topic_parts").await;
+        let (orch, domain, url, _dir) = start_orch_with_http("e2e_http_topic_parts").await;
         let client = reqwest::Client::new();
 
         // Create a topic first
@@ -443,7 +449,7 @@ async fn e2e_http_topic_partitions() {
         assert_eq!(resp.status(), 200);
 
         orch.shutdown().await;
-        session.close().await.unwrap();
+        domain.shutdown().await.unwrap();
     });
 }
 
@@ -454,7 +460,7 @@ async fn e2e_http_topic_partitions() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_http_events_query_validation() {
     with_timeout!({
-        let (orch, session, url, _dir) = start_orch_with_http("events_query").await;
+        let (orch, domain, url, _dir) = start_orch_with_http("e2e_http_events_query").await;
         let client = reqwest::Client::new();
 
         // Missing topic → 400
@@ -498,7 +504,7 @@ async fn e2e_http_events_query_validation() {
         assert_eq!(body["total"], 0);
 
         orch.shutdown().await;
-        session.close().await.unwrap();
+        domain.shutdown().await.unwrap();
     });
 }
 
@@ -509,10 +515,13 @@ async fn e2e_http_events_query_validation() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_http_publish_and_query_events() {
     with_timeout!({
+        let http_start_guard = HTTP_START_MUTEX.lock().await;
         let port = free_port().await;
-        let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+        let domain = MitiflowDomain::isolated_for_test("e2e_http_pub_query")
+            .await
+            .unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let prefix = key_prefix("pub_query");
+        let prefix = domain.namespace().root().to_string();
 
         let config = OrchestratorConfig {
             key_prefix: prefix.clone(),
@@ -524,9 +533,10 @@ async fn e2e_http_publish_and_query_events() {
             bootstrap_topics_from: None,
         };
 
-        let mut orch = Orchestrator::new(&session, config).unwrap();
+        let mut orch = Orchestrator::new(domain.session(), config).unwrap();
         orch.run().await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(http_start_guard);
 
         let url = format!("http://127.0.0.1:{port}");
         let client = reqwest::Client::new();
@@ -552,7 +562,7 @@ async fn e2e_http_publish_and_query_events() {
             .cache_size(10)
             .build()
             .unwrap();
-        let publisher = mitiflow::EventPublisher::new(&session, bus_config.clone())
+        let publisher = mitiflow::EventPublisher::new(domain.session(), bus_config.clone())
             .await
             .unwrap();
 
@@ -579,6 +589,6 @@ async fn e2e_http_publish_and_query_events() {
         drop(client);
         drop(publisher);
         orch.shutdown().await;
-        session.close().await.unwrap();
+        domain.shutdown().await.unwrap();
     });
 }

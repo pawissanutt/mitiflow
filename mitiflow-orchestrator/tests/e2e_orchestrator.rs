@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use mitiflow::EventBusConfig;
+use mitiflow::{EventBusConfig, MitiflowDomain};
 use mitiflow_orchestrator::orchestrator::{Orchestrator, OrchestratorConfig};
 use mitiflow_storage::{
     NodeStatus, OverrideEntry, PartitionStatus, StorageAgent, StorageAgentConfigBuilder, StoreState,
@@ -14,15 +14,10 @@ use mitiflow_storage::{
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Unique key prefix per test to avoid cross-talk.
-fn key_prefix(test: &str) -> String {
-    format!("test/e2e_orch_{test}_{}", uuid::Uuid::now_v7())
-}
-
 /// Slot holding a running agent.
 struct AgentSlot {
     agent: StorageAgent,
-    session: zenoh::Session,
+    domain: MitiflowDomain,
     _tmp: tempfile::TempDir,
 }
 
@@ -31,27 +26,43 @@ struct OrchestratorTestCluster {
     prefix: String,
     num_partitions: u32,
     replication_factor: u32,
+    parent_domain: Option<MitiflowDomain>,
     agents: Vec<Option<AgentSlot>>,
     orchestrator: Option<Orchestrator>,
-    orch_session: Option<zenoh::Session>,
+    orch_domain: Option<MitiflowDomain>,
     _orch_dir: Option<tempfile::TempDir>,
 }
 
 impl OrchestratorTestCluster {
-    fn new(test_name: &str, num_nodes: usize, num_partitions: u32, rf: u32) -> Self {
+    async fn new(test_name: &str, num_nodes: usize, num_partitions: u32, rf: u32) -> Self {
+        let parent_domain = MitiflowDomain::isolated_for_test(test_name)
+            .await
+            .expect("isolated parent domain for OrchestratorTestCluster");
+        let prefix = parent_domain.namespace().root().to_string();
         Self {
-            prefix: key_prefix(test_name),
+            prefix,
             num_partitions,
             replication_factor: rf,
+            parent_domain: Some(parent_domain),
             agents: (0..num_nodes).map(|_| None).collect(),
             orchestrator: None,
-            orch_session: None,
+            orch_domain: None,
             _orch_dir: None,
         }
     }
 
+    fn parent(&self) -> &MitiflowDomain {
+        self.parent_domain
+            .as_ref()
+            .expect("parent domain available before shutdown")
+    }
+
     async fn start_agent(&mut self, idx: usize) {
-        let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+        let domain = self
+            .parent()
+            .join_isolated()
+            .await
+            .expect("join_isolated for agent session");
         let tmp = tempfile::tempdir().unwrap();
         let bus_config = EventBusConfig::builder(&self.prefix)
             .cache_size(100)
@@ -66,10 +77,10 @@ impl OrchestratorTestCluster {
             .build()
             .unwrap();
 
-        let agent = StorageAgent::start(&session, config).await.unwrap();
+        let agent = StorageAgent::start(domain.session(), config).await.unwrap();
         self.agents[idx] = Some(AgentSlot {
             agent,
-            session,
+            domain,
             _tmp: tmp,
         });
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -78,19 +89,23 @@ impl OrchestratorTestCluster {
     async fn stop_agent(&mut self, idx: usize) {
         if let Some(mut slot) = self.agents[idx].take() {
             slot.agent.shutdown().await.unwrap();
-            slot.session.close().await.unwrap();
+            slot.domain.shutdown().await.unwrap();
         }
     }
 
     async fn kill_agent(&mut self, idx: usize) {
         if let Some(slot) = self.agents[idx].take() {
-            // Close session abruptly — liveliness token drops but no graceful drain.
-            let _ = slot.session.close().await;
+            // Close child domain abruptly — liveliness token drops but no graceful drain.
+            let _ = slot.domain.shutdown().await;
         }
     }
 
     async fn start_orchestrator(&mut self) {
-        let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+        let domain = self
+            .parent()
+            .join_isolated()
+            .await
+            .expect("join_isolated for orchestrator session");
         let dir = tempfile::tempdir().unwrap();
         let config = OrchestratorConfig {
             key_prefix: self.prefix.clone(),
@@ -101,10 +116,10 @@ impl OrchestratorTestCluster {
             auth_token: None,
             bootstrap_topics_from: None,
         };
-        let mut orch = Orchestrator::new(&session, config).unwrap();
+        let mut orch = Orchestrator::new(domain.session(), config).unwrap();
         orch.run().await.unwrap();
         self.orchestrator = Some(orch);
-        self.orch_session = Some(session);
+        self.orch_domain = Some(domain);
         self._orch_dir = Some(dir);
     }
 
@@ -112,8 +127,8 @@ impl OrchestratorTestCluster {
         if let Some(orch) = self.orchestrator.take() {
             orch.shutdown().await;
         }
-        if let Some(s) = self.orch_session.take() {
-            let _ = s.close().await;
+        if let Some(d) = self.orch_domain.take() {
+            let _ = d.shutdown().await;
         }
         self._orch_dir = None;
     }
@@ -186,7 +201,7 @@ impl OrchestratorTestCluster {
                 };
                 if let Ok(bytes) = serde_json::to_vec(&status) {
                     let key = format!("{}/_cluster/status/node-{i}", self.prefix);
-                    let _ = s.session.put(&key, bytes).await;
+                    let _ = s.domain.session().put(&key, bytes).await;
                 }
             }
         }
@@ -271,6 +286,9 @@ impl OrchestratorTestCluster {
             self.stop_agent(i).await;
         }
         self.stop_orchestrator().await;
+        if let Some(parent) = self.parent_domain.take() {
+            parent.shutdown().await.unwrap();
+        }
     }
 }
 
@@ -279,7 +297,7 @@ impl OrchestratorTestCluster {
 /// 1. Orchestrator joins a running cluster and catches up.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_orchestrator_joins_running_cluster_catches_up() {
-    let mut c = OrchestratorTestCluster::new("orch_join", 3, 6, 1);
+    let mut c = OrchestratorTestCluster::new("orch_join", 3, 6, 1).await;
 
     // Start agents first
     for i in 0..3 {
@@ -304,7 +322,7 @@ async fn e2e_orchestrator_joins_running_cluster_catches_up() {
 /// 2. Drain moves partitions away from the drained node.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_drain_node_moves_partitions() {
-    let mut c = OrchestratorTestCluster::new("drain_move", 3, 6, 1);
+    let mut c = OrchestratorTestCluster::new("drain_move", 3, 6, 1).await;
 
     // Start orchestrator FIRST so ClusterView subscription catches status puts
     c.start_orchestrator().await;
@@ -385,7 +403,7 @@ async fn e2e_drain_node_moves_partitions() {
 ///    creates a gap, verified here for correctness of the override semantics).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_override_offline_node_falls_back_to_hrw() {
-    let mut c = OrchestratorTestCluster::new("override_offline", 3, 6, 1);
+    let mut c = OrchestratorTestCluster::new("override_offline", 3, 6, 1).await;
 
     for i in 0..3 {
         c.start_agent(i).await;
@@ -458,7 +476,7 @@ async fn e2e_override_offline_node_falls_back_to_hrw() {
 /// 4. Override with TTL expires, reverts to HRW.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_override_expiry_reverts_to_hrw() {
-    let mut c = OrchestratorTestCluster::new("override_ttl", 3, 6, 1);
+    let mut c = OrchestratorTestCluster::new("override_ttl", 3, 6, 1).await;
 
     for i in 0..3 {
         c.start_agent(i).await;
@@ -513,7 +531,7 @@ async fn e2e_override_expiry_reverts_to_hrw() {
 /// 5. Full drain → maintenance → undrain roundtrip.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_full_drain_maintenance_undrain_roundtrip() {
-    let mut c = OrchestratorTestCluster::new("drain_roundtrip", 3, 6, 1);
+    let mut c = OrchestratorTestCluster::new("drain_roundtrip", 3, 6, 1).await;
 
     // Start orchestrator first for subscription timing
     c.start_orchestrator().await;
@@ -596,7 +614,7 @@ async fn e2e_full_drain_maintenance_undrain_roundtrip() {
 /// 6. Orchestrator restart rebuilds cluster view from live agents.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_orchestrator_restart_rebuilds_cluster_view() {
-    let mut c = OrchestratorTestCluster::new("orch_restart", 3, 6, 1);
+    let mut c = OrchestratorTestCluster::new("orch_restart", 3, 6, 1).await;
 
     for i in 0..3 {
         c.start_agent(i).await;
@@ -625,7 +643,7 @@ async fn e2e_orchestrator_restart_rebuilds_cluster_view() {
 /// 7. Concurrent override + crash — cluster converges to stable state.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_concurrent_override_and_crash() {
-    let mut c = OrchestratorTestCluster::new("override_crash", 3, 6, 1);
+    let mut c = OrchestratorTestCluster::new("override_crash", 3, 6, 1).await;
 
     for i in 0..3 {
         c.start_agent(i).await;

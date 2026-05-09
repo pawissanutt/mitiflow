@@ -11,17 +11,21 @@
 //! Each test uses a unique UUID-v7 key prefix to avoid cross-test interference.
 
 use std::collections::HashMap;
+use std::sync::LazyLock;
 use std::time::Duration;
 
-use mitiflow::EventBusConfig;
 use mitiflow::store::OffsetCommit;
 use mitiflow::store::watermark::{CommitWatermark, PublisherWatermark};
 use mitiflow::types::PublisherId;
+use mitiflow::{EventBusConfig, MitiflowDomain};
 use mitiflow_orchestrator::orchestrator::{Orchestrator, OrchestratorConfig};
 use mitiflow_storage::{
     NodeStatus, PartitionStatus, StorageAgent, StorageAgentConfigBuilder, StoreState,
 };
 use serde_json::Value;
+
+static HTTP_START_MUTEX: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 /// Wrap a test body in a timeout to prevent hangs.
 macro_rules! with_timeout {
@@ -30,11 +34,6 @@ macro_rules! with_timeout {
             .await
             .expect("test timed out after 60s")
     };
-}
-
-/// Unique key prefix per test to avoid cross-talk.
-fn key_prefix(test: &str) -> String {
-    format!("test/e2e_sync_{test}_{}", uuid::Uuid::now_v7())
 }
 
 /// Find a free TCP port.
@@ -48,7 +47,7 @@ async fn free_port() -> u16 {
 /// Slot holding a running agent.
 struct AgentSlot {
     agent: StorageAgent,
-    session: zenoh::Session,
+    domain: MitiflowDomain,
     node_id: String,
     _tmp: tempfile::TempDir,
 }
@@ -58,9 +57,10 @@ struct StateSyncCluster {
     prefix: String,
     num_partitions: u32,
     replication_factor: u32,
+    parent_domain: Option<MitiflowDomain>,
     agents: Vec<Option<AgentSlot>>,
     orchestrator: Option<Orchestrator>,
-    orch_session: Option<zenoh::Session>,
+    orch_domain: Option<MitiflowDomain>,
     _orch_dir: Option<tempfile::TempDir>,
     /// HTTP base URL (if HTTP enabled).
     http_url: Option<String>,
@@ -69,23 +69,38 @@ struct StateSyncCluster {
 }
 
 impl StateSyncCluster {
-    fn new(test_name: &str, num_slots: usize, num_partitions: u32, rf: u32) -> Self {
+    async fn new(test_name: &str, num_slots: usize, num_partitions: u32, rf: u32) -> Self {
+        let parent_domain = MitiflowDomain::isolated_for_test(test_name)
+            .await
+            .expect("isolated parent domain for StateSyncCluster");
+        let prefix = parent_domain.namespace().root().to_string();
         Self {
-            prefix: key_prefix(test_name),
+            prefix,
             num_partitions,
             replication_factor: rf,
+            parent_domain: Some(parent_domain),
             agents: (0..num_slots).map(|_| None).collect(),
             orchestrator: None,
-            orch_session: None,
+            orch_domain: None,
             _orch_dir: None,
             http_url: None,
             all_node_ids: Vec::new(),
         }
     }
 
+    fn parent(&self) -> &MitiflowDomain {
+        self.parent_domain
+            .as_ref()
+            .expect("parent domain available before shutdown")
+    }
+
     /// Start an agent at the given slot index with a specific node_id.
     async fn start_agent_with_id(&mut self, idx: usize, node_id: &str) {
-        let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+        let domain = self
+            .parent()
+            .join_isolated()
+            .await
+            .expect("join_isolated for agent session");
         let tmp = tempfile::tempdir().unwrap();
         let bus_config = EventBusConfig::builder(&self.prefix)
             .cache_size(100)
@@ -100,13 +115,13 @@ impl StateSyncCluster {
             .build()
             .unwrap();
 
-        let agent = StorageAgent::start(&session, config).await.unwrap();
+        let agent = StorageAgent::start(domain.session(), config).await.unwrap();
         if !self.all_node_ids.contains(&node_id.to_string()) {
             self.all_node_ids.push(node_id.to_string());
         }
         self.agents[idx] = Some(AgentSlot {
             agent,
-            session,
+            domain,
             node_id: node_id.to_string(),
             _tmp: tmp,
         });
@@ -130,20 +145,24 @@ impl StateSyncCluster {
     async fn stop_agent(&mut self, idx: usize) {
         if let Some(mut slot) = self.agents[idx].take() {
             slot.agent.shutdown().await.unwrap();
-            slot.session.close().await.unwrap();
+            slot.domain.shutdown().await.unwrap();
         }
     }
 
     /// Kill an agent abruptly (no graceful drain).
     async fn kill_agent(&mut self, idx: usize) {
         if let Some(slot) = self.agents[idx].take() {
-            let _ = slot.session.close().await;
+            let _ = slot.domain.shutdown().await;
         }
     }
 
     /// Start orchestrator without HTTP.
     async fn start_orchestrator(&mut self) {
-        let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+        let domain = self
+            .parent()
+            .join_isolated()
+            .await
+            .expect("join_isolated for orchestrator session");
         let dir = tempfile::tempdir().unwrap();
         let config = OrchestratorConfig {
             key_prefix: self.prefix.clone(),
@@ -154,17 +173,22 @@ impl StateSyncCluster {
             auth_token: None,
             bootstrap_topics_from: None,
         };
-        let mut orch = Orchestrator::new(&session, config).unwrap();
+        let mut orch = Orchestrator::new(domain.session(), config).unwrap();
         orch.run().await.unwrap();
         self.orchestrator = Some(orch);
-        self.orch_session = Some(session);
+        self.orch_domain = Some(domain);
         self._orch_dir = Some(dir);
     }
 
     /// Start orchestrator with HTTP enabled on a random port.
     async fn start_orchestrator_with_http(&mut self) {
+        let http_start_guard = HTTP_START_MUTEX.lock().await;
         let port = free_port().await;
-        let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+        let domain = self
+            .parent()
+            .join_isolated()
+            .await
+            .expect("join_isolated for orchestrator session");
         let dir = tempfile::tempdir().unwrap();
         let config = OrchestratorConfig {
             key_prefix: self.prefix.clone(),
@@ -175,21 +199,22 @@ impl StateSyncCluster {
             auth_token: None,
             bootstrap_topics_from: None,
         };
-        let mut orch = Orchestrator::new(&session, config).unwrap();
+        let mut orch = Orchestrator::new(domain.session(), config).unwrap();
         orch.run().await.unwrap();
         self.orchestrator = Some(orch);
-        self.orch_session = Some(session);
+        self.orch_domain = Some(domain);
         self._orch_dir = Some(dir);
         self.http_url = Some(format!("http://127.0.0.1:{port}"));
         tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(http_start_guard);
     }
 
     async fn stop_orchestrator(&mut self) {
         if let Some(orch) = self.orchestrator.take() {
             orch.shutdown().await;
         }
-        if let Some(s) = self.orch_session.take() {
-            let _ = s.close().await;
+        if let Some(d) = self.orch_domain.take() {
+            let _ = d.shutdown().await;
         }
         self._orch_dir = None;
         self.http_url = None;
@@ -303,7 +328,7 @@ impl StateSyncCluster {
             };
             if let Ok(bytes) = serde_json::to_vec(&status) {
                 let key = format!("{}/_cluster/status/{}", self.prefix, slot.node_id);
-                let _ = slot.session.put(&key, bytes).await;
+                let _ = slot.domain.session().put(&key, bytes).await;
             }
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -379,7 +404,7 @@ impl StateSyncCluster {
         publisher_id: PublisherId,
         committed_seq: u64,
     ) {
-        let session = self.orch_session.as_ref().unwrap();
+        let session = self.orch_domain.as_ref().unwrap().session();
         let wm = CommitWatermark {
             partition,
             publishers: {
@@ -409,7 +434,7 @@ impl StateSyncCluster {
         publisher_id: PublisherId,
         offset_seq: u64,
     ) {
-        let session = self.orch_session.as_ref().unwrap();
+        let session = self.orch_domain.as_ref().unwrap().session();
         let commit = OffsetCommit {
             group_id: group_id.to_string(),
             member_id: "test-member".to_string(),
@@ -434,6 +459,9 @@ impl StateSyncCluster {
             self.stop_agent(i).await;
         }
         self.stop_orchestrator().await;
+        if let Some(parent) = self.parent_domain.take() {
+            parent.shutdown().await.unwrap();
+        }
     }
 }
 
@@ -448,7 +476,7 @@ impl StateSyncCluster {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_storage_restart_new_id_creates_phantom_node() {
     with_timeout!({
-        let mut c = StateSyncCluster::new("phantom_node", 3, 6, 1);
+        let mut c = StateSyncCluster::new("phantom_node", 3, 6, 1).await;
         c.start_orchestrator_with_http().await;
 
         // Start 3 agents with explicit IDs
@@ -527,7 +555,7 @@ async fn e2e_storage_restart_new_id_creates_phantom_node() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_storage_restart_same_id_preserves_identity() {
     with_timeout!({
-        let mut c = StateSyncCluster::new("same_id", 3, 6, 1);
+        let mut c = StateSyncCluster::new("same_id", 3, 6, 1).await;
         c.start_orchestrator().await;
 
         for i in 0..3 {
@@ -579,7 +607,7 @@ async fn e2e_storage_restart_same_id_preserves_identity() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_multiple_restarts_accumulate_phantoms() {
     with_timeout!({
-        let mut c = StateSyncCluster::new("multi_phantom", 1, 4, 1);
+        let mut c = StateSyncCluster::new("multi_phantom", 1, 4, 1).await;
         c.start_orchestrator_with_http().await;
 
         // Start 1 agent with auto-ID
@@ -652,7 +680,7 @@ async fn e2e_multiple_restarts_accumulate_phantoms() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_rapid_restart_same_id_no_duplicate() {
     with_timeout!({
-        let mut c = StateSyncCluster::new("rapid_restart", 3, 6, 1);
+        let mut c = StateSyncCluster::new("rapid_restart", 3, 6, 1).await;
         c.start_orchestrator().await;
 
         for i in 0..3 {
@@ -694,7 +722,7 @@ async fn e2e_rapid_restart_same_id_no_duplicate() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_restart_agent_partition_coverage_maintained() {
     with_timeout!({
-        let mut c = StateSyncCluster::new("coverage_restart", 3, 12, 1);
+        let mut c = StateSyncCluster::new("coverage_restart", 3, 12, 1).await;
         c.start_orchestrator().await;
 
         for i in 0..3 {
@@ -742,7 +770,7 @@ async fn e2e_restart_agent_partition_coverage_maintained() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_drain_then_restart_new_id_orphans_overrides() {
     with_timeout!({
-        let mut c = StateSyncCluster::new("drain_new_id", 3, 6, 1);
+        let mut c = StateSyncCluster::new("drain_new_id", 3, 6, 1).await;
         c.start_orchestrator().await;
 
         for i in 0..3 {
@@ -836,7 +864,7 @@ async fn e2e_drain_then_restart_new_id_orphans_overrides() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_undrain_after_restart_new_id_cleans_up() {
     with_timeout!({
-        let mut c = StateSyncCluster::new("undrain_new_id", 3, 6, 1);
+        let mut c = StateSyncCluster::new("undrain_new_id", 3, 6, 1).await;
         c.start_orchestrator().await;
 
         for i in 0..3 {
@@ -902,7 +930,7 @@ async fn e2e_undrain_after_restart_new_id_cleans_up() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_drain_active_node_killed_during_propagation() {
     with_timeout!({
-        let mut c = StateSyncCluster::new("drain_kill", 3, 6, 1);
+        let mut c = StateSyncCluster::new("drain_kill", 3, 6, 1).await;
         c.start_orchestrator().await;
 
         for i in 0..3 {
@@ -959,7 +987,7 @@ async fn e2e_drain_active_node_killed_during_propagation() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_lag_reports_stale_after_agent_death() {
     with_timeout!({
-        let mut c = StateSyncCluster::new("lag_stale", 1, 4, 1);
+        let mut c = StateSyncCluster::new("lag_stale", 1, 4, 1).await;
         c.start_orchestrator().await;
         c.start_agent(0).await;
         c.wait_for_online_count(1, Duration::from_secs(5)).await;
@@ -1022,7 +1050,7 @@ async fn e2e_lag_reports_stale_after_agent_death() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_watermark_resumes_after_agent_restart() {
     with_timeout!({
-        let mut c = StateSyncCluster::new("wm_resume", 1, 4, 1);
+        let mut c = StateSyncCluster::new("wm_resume", 1, 4, 1).await;
         c.start_orchestrator().await;
         c.start_agent(0).await;
         c.wait_for_online_count(1, Duration::from_secs(5)).await;
@@ -1074,7 +1102,7 @@ async fn e2e_watermark_resumes_after_agent_restart() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_lag_monitor_handles_publisher_restart() {
     with_timeout!({
-        let mut c = StateSyncCluster::new("pub_restart", 1, 4, 1);
+        let mut c = StateSyncCluster::new("pub_restart", 1, 4, 1).await;
         c.start_orchestrator().await;
         c.start_agent(0).await;
         c.wait_for_online_count(1, Duration::from_secs(5)).await;
@@ -1130,7 +1158,7 @@ async fn e2e_lag_monitor_handles_publisher_restart() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_orchestrator_restart_rediscovers_all_agents() {
     with_timeout!({
-        let mut c = StateSyncCluster::new("orch_restart_disco", 3, 6, 1);
+        let mut c = StateSyncCluster::new("orch_restart_disco", 3, 6, 1).await;
 
         // Start agents first
         for i in 0..3 {
@@ -1172,9 +1200,13 @@ async fn e2e_orchestrator_restart_rediscovers_all_agents() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_orchestrator_restart_preserves_topic_config() {
     with_timeout!({
-        let prefix = key_prefix("orch_persist");
+        let parent = MitiflowDomain::isolated_for_test("e2e_orch_persist")
+            .await
+            .unwrap();
+        let prefix = parent.namespace().root().to_string();
+        let http_start_guard = HTTP_START_MUTEX.lock().await;
         let port = free_port().await;
-        let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+        let domain1 = parent.join_isolated().await.unwrap();
         let dir = tempfile::tempdir().unwrap();
         let data_dir = dir.path().to_path_buf();
 
@@ -1188,9 +1220,10 @@ async fn e2e_orchestrator_restart_preserves_topic_config() {
             auth_token: None,
             bootstrap_topics_from: None,
         };
-        let mut orch = Orchestrator::new(&session, config).unwrap();
+        let mut orch = Orchestrator::new(domain1.session(), config).unwrap();
         orch.run().await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(http_start_guard);
 
         let client = reqwest::Client::new();
         let base_url = format!("http://127.0.0.1:{port}");
@@ -1222,11 +1255,12 @@ async fn e2e_orchestrator_restart_preserves_topic_config() {
 
         // Shutdown orchestrator
         orch.shutdown().await;
-        session.close().await.unwrap();
+        domain1.shutdown().await.unwrap();
 
         // Restart with same data_dir but new port
+        let http_start_guard = HTTP_START_MUTEX.lock().await;
         let port2 = free_port().await;
-        let session2 = zenoh::open(zenoh::Config::default()).await.unwrap();
+        let domain2 = parent.join_isolated().await.unwrap();
         let config2 = OrchestratorConfig {
             key_prefix: prefix.clone(),
             data_dir: data_dir.clone(),
@@ -1236,9 +1270,10 @@ async fn e2e_orchestrator_restart_preserves_topic_config() {
             auth_token: None,
             bootstrap_topics_from: None,
         };
-        let mut orch2 = Orchestrator::new(&session2, config2).unwrap();
+        let mut orch2 = Orchestrator::new(domain2.session(), config2).unwrap();
         orch2.run().await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(http_start_guard);
 
         let base_url2 = format!("http://127.0.0.1:{port2}");
 
@@ -1266,7 +1301,8 @@ async fn e2e_orchestrator_restart_preserves_topic_config() {
         }
 
         orch2.shutdown().await;
-        session2.close().await.unwrap();
+        domain2.shutdown().await.unwrap();
+        parent.shutdown().await.unwrap();
     });
 }
 
@@ -1274,7 +1310,7 @@ async fn e2e_orchestrator_restart_preserves_topic_config() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_orchestrator_restart_lag_monitor_recovers() {
     with_timeout!({
-        let mut c = StateSyncCluster::new("orch_lag_recover", 1, 4, 1);
+        let mut c = StateSyncCluster::new("orch_lag_recover", 1, 4, 1).await;
         c.start_orchestrator().await;
         c.start_agent(0).await;
         c.wait_for_online_count(1, Duration::from_secs(5)).await;
@@ -1336,7 +1372,7 @@ async fn e2e_orchestrator_restart_lag_monitor_recovers() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_sse_cluster_events_reflect_agent_lifecycle() {
     with_timeout!({
-        let mut c = StateSyncCluster::new("sse_lifecycle", 3, 4, 1);
+        let mut c = StateSyncCluster::new("sse_lifecycle", 3, 4, 1).await;
         c.start_orchestrator_with_http().await;
 
         let url = c.http_url().to_string();
@@ -1424,7 +1460,7 @@ async fn e2e_sse_cluster_events_reflect_agent_lifecycle() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_http_cluster_nodes_consistent_with_cluster_view() {
     with_timeout!({
-        let mut c = StateSyncCluster::new("http_cv_consistent", 3, 6, 1);
+        let mut c = StateSyncCluster::new("http_cv_consistent", 3, 6, 1).await;
         c.start_orchestrator_with_http().await;
 
         // Start all agents
@@ -1485,7 +1521,7 @@ async fn e2e_http_cluster_nodes_consistent_with_cluster_view() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn e2e_http_status_consistent_with_nodes_endpoint() {
     with_timeout!({
-        let mut c = StateSyncCluster::new("http_status_consistent", 3, 4, 1);
+        let mut c = StateSyncCluster::new("http_status_consistent", 3, 4, 1).await;
         c.start_orchestrator_with_http().await;
 
         for i in 0..3 {
