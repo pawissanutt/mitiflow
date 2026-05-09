@@ -6,18 +6,13 @@ mod common;
 
 use std::time::Duration;
 
-use mitiflow::{Event, EventBusConfig, EventPublisher};
+use mitiflow::{Event, EventPublisher};
 
 use common::TestPayload;
 
-/// Helper: create a config with unique key prefix to avoid cross-test interference.
-fn test_config(test_name: &str) -> EventBusConfig {
-    common::test_config(test_name)
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn single_publisher_single_subscriber() {
-    let (session, publisher, subscriber) = common::setup_pubsub("single_pub_sub").await;
+    let (domain, publisher, subscriber) = common::setup_pubsub("single_pub_sub").await;
 
     let count = 5u64;
     common::publish_n(&publisher, count).await;
@@ -30,12 +25,12 @@ async fn single_publisher_single_subscriber() {
 
     drop(publisher);
     drop(subscriber);
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn recv_raw_returns_deserializable_event() {
-    let (session, publisher, subscriber) = common::setup_pubsub("recv_raw").await;
+    let (domain, publisher, subscriber) = common::setup_pubsub("recv_raw").await;
 
     let event = Event::new(TestPayload { value: 42 });
     publisher.publish(&event).await.unwrap();
@@ -53,12 +48,12 @@ async fn recv_raw_returns_deserializable_event() {
 
     drop(publisher);
     drop(subscriber);
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn multiple_events_maintain_sequence_order() {
-    let (session, publisher, subscriber) = common::setup_pubsub("seq_order").await;
+    let (domain, publisher, subscriber) = common::setup_pubsub("seq_order").await;
 
     let count = 20u64;
     common::publish_n(&publisher, count).await;
@@ -71,15 +66,15 @@ async fn multiple_events_maintain_sequence_order() {
 
     drop(publisher);
     drop(subscriber);
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publisher_id_is_stable() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = common::isolated_domain("pub_id_stable").await;
 
-    let config = test_config("pub_id_stable");
-    let publisher = EventPublisher::new(&session, config).await.unwrap();
+    let config = common::test_config(&domain);
+    let publisher = EventPublisher::new(domain.session(), config).await.unwrap();
 
     // Publisher ID should not change between calls.
     let id1 = *publisher.publisher_id();
@@ -96,19 +91,18 @@ async fn publisher_id_is_stable() {
     assert_eq!(publisher.current_seq(), 1);
 
     drop(publisher);
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publish_to_custom_key() {
-    let (session, publisher, subscriber) = common::setup_pubsub("custom_key").await;
+    let (domain, publisher, subscriber) = common::setup_pubsub("custom_key").await;
 
-    // Publish to a custom sub-key.
+    // Custom key under the domain's topic prefix so the subscriber's
+    // wildcard subscription `{prefix}/**` matches it.
+    let custom_key = format!("{}/topics/events/orders/123", domain.namespace().root());
     let receipt = publisher
-        .publish_to(
-            "test/custom_key/orders/123",
-            &Event::new(TestPayload { value: 99 }),
-        )
+        .publish_to(&custom_key, &Event::new(TestPayload { value: 99 }))
         .await
         .unwrap();
     assert_eq!(receipt.seq, 0);
@@ -119,12 +113,9 @@ async fn publish_to_custom_key() {
         .expect("recv failed");
 
     assert_eq!(event.payload.value, 99);
-    assert_eq!(
-        event.key_expr.as_deref(),
-        Some("test/custom_key/orders/123")
-    );
+    assert_eq!(event.key_expr.as_deref(), Some(custom_key.as_str()));
 
     drop(publisher);
     drop(subscriber);
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }

@@ -1,5 +1,7 @@
 //! Integration tests for partitioned consumer groups (Phase 3).
 
+mod common;
+
 use mitiflow::partition::hash_ring;
 
 #[test]
@@ -61,14 +63,16 @@ fn hrw_leave_only_redistributes_departed() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn partition_manager_basic() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let config = mitiflow::EventBusConfig::builder("test/partition_basic")
+    let domain = common::isolated_domain("partition_basic").await;
+    let config = domain
+        .event_bus_config("events")
+        .unwrap()
         .worker_id("worker-1")
         .num_partitions(16)
         .build()
         .unwrap();
 
-    let pm = mitiflow::PartitionManager::new(&session, config)
+    let pm = mitiflow::PartitionManager::new(domain.session(), config)
         .await
         .unwrap();
     let parts = pm.my_partitions().await;
@@ -77,20 +81,28 @@ async fn partition_manager_basic() {
     assert_eq!(parts.len(), 16);
     assert_eq!(pm.worker_id(), "worker-1");
     assert_eq!(pm.num_partitions(), 16);
+
+    drop(pm);
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn partition_manager_two_workers_rebalance() {
-    let session1 = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let session2 = zenoh::open(zenoh::Config::default()).await.unwrap();
+    // Two workers must share Zenoh liveliness — child joins parent's listen
+    // endpoint as a Client so the two sessions can communicate without
+    // multicast scouting (which LocalIsolated disables).
+    let domain1 = common::isolated_domain("partition_rebal").await;
+    let domain2 = domain1.join_isolated().await.unwrap();
 
-    let config1 = mitiflow::EventBusConfig::builder("test/partition_rebal")
+    let config1 = domain1
+        .event_bus_config("events")
+        .unwrap()
         .worker_id("w1")
         .num_partitions(16)
         .build()
         .unwrap();
 
-    let pm1 = mitiflow::PartitionManager::new(&session1, config1)
+    let pm1 = mitiflow::PartitionManager::new(domain1.session(), config1)
         .await
         .unwrap();
 
@@ -99,13 +111,15 @@ async fn partition_manager_two_workers_rebalance() {
     assert_eq!(initial.len(), 16);
 
     // Now w2 joins.
-    let config2 = mitiflow::EventBusConfig::builder("test/partition_rebal")
+    let config2 = domain2
+        .event_bus_config("events")
+        .unwrap()
         .worker_id("w2")
         .num_partitions(16)
         .build()
         .unwrap();
 
-    let pm2 = mitiflow::PartitionManager::new(&session2, config2)
+    let pm2 = mitiflow::PartitionManager::new(domain2.session(), config2)
         .await
         .unwrap();
 
@@ -127,4 +141,11 @@ async fn partition_manager_two_workers_rebalance() {
     for p in &p1 {
         assert!(!p2.contains(p), "partition {p} assigned to both workers");
     }
+
+    // Drop child partition manager + shut down child domain before the parent
+    // so the Client transport closes cleanly while the parent listener is up.
+    drop(pm2);
+    domain2.shutdown().await.unwrap();
+    drop(pm1);
+    domain1.shutdown().await.unwrap();
 }
