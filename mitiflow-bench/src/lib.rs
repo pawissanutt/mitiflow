@@ -4,6 +4,7 @@ pub mod transport;
 
 use clap::{Parser, ValueEnum};
 use lightbench::BenchmarkConfig;
+use mitiflow::TransportProfile;
 
 /// Transport backends available for benchmarking.
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -328,14 +329,42 @@ pub fn kafka_topic(topic: &str) -> String {
 
 /// Build a Zenoh config, optionally connecting to a router.
 pub fn zenoh_config(connect: Option<&str>) -> zenoh::Config {
-    let mut config = zenoh::Config::default();
-    if let Some(endpoint) = connect {
-        config
-            .insert_json5("connect/endpoints", &format!("[\"{endpoint}\"]"))
-            .expect("invalid zenoh connect config");
-        config
-            .insert_json5("scouting/multicast/enabled", "false")
-            .expect("invalid zenoh scouting config");
+    let profile = match connect {
+        Some(endpoint) => TransportProfile::Client {
+            connect: vec![endpoint.to_string()],
+        },
+        std::option::Option::None => TransportProfile::Ambient,
+    };
+    profile
+        .to_zenoh_config()
+        .expect("invalid zenoh transport profile config")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transport_profile_equivalence() {
+        let actual = zenoh_config(Some("tcp/x:1"));
+        let expected = TransportProfile::Client {
+            connect: vec!["tcp/x:1".to_string()],
+        }
+        .to_zenoh_config()
+        .expect("client transport profile must build");
+
+        for key in [
+            "mode",
+            "connect/endpoints",
+            "scouting/multicast/enabled",
+            "scouting/gossip/enabled",
+            "timestamping/enabled",
+        ] {
+            assert_eq!(
+                actual.get_json(key).ok(),
+                expected.get_json(key).ok(),
+                "Zenoh config key {key} must match TransportProfile::Client"
+            );
+        }
     }
-    config
 }
