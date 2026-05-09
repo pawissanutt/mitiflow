@@ -39,6 +39,17 @@ cargo bench -p mitiflow                      # Criterion micro-benchmarks
 - `wal` — Placeholder for future publisher WAL support; no code path currently uses it
 - `full` — All of the above
 
+## Domains
+
+- Use `MitiflowDomain` for Zenoh session setup; see `docs/21_domains.md` for the full domain, namespace, and transport guide.
+- Tests must use `MitiflowDomain::isolated_for_test("unique_test_name")`, not raw `zenoh::open(zenoh::Config::default())`; keep unique test names and the multi-thread Tokio runtime rule.
+- Unconfigured binaries and default domain opens use `LocalIsolated`.
+- Transport profiles:
+  - `LocalIsolated`: default, localhost-only, no router, no scouting.
+  - `Client`: explicit Zenoh router endpoints, requires connect.
+  - `PeerMesh`: explicit peer endpoints, no router, requires connect.
+  - `Ambient`: opt-in Zenoh defaults/discovery, warning logged.
+
 ## Code Conventions
 
 ### Rust Patterns

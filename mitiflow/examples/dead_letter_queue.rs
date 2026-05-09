@@ -20,8 +20,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use mitiflow::{
-    BackoffStrategy, DeadLetterQueue, DlqConfig, Event, EventBusConfig, EventPublisher,
-    EventSubscriber, HeartbeatMode, RetryOutcome,
+    BackoffStrategy, DeadLetterQueue, DlqConfig, Event, EventPublisher, EventSubscriber,
+    HeartbeatMode, MitiflowDomain, RetryOutcome,
 };
 
 // ---------------------------------------------------------------------------
@@ -74,14 +74,16 @@ async fn main() -> mitiflow::Result<()> {
         .with_env_filter("mitiflow=warn,dead_letter_queue=info")
         .init();
 
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::builder("examples-dead-letter-queue")
+        .open()
+        .await?;
 
-    const DLQ_PREFIX: &str = "demo/txn/_dlq";
-
-    let config = EventBusConfig::builder("demo/txn")
+    let config = domain
+        .event_bus_config("txn")?
         .cache_size(100)
         .heartbeat(HeartbeatMode::Disabled)
         .build()?;
+    let dlq_prefix = format!("{}/_dlq", config.key_prefix);
 
     // -------------------------------------------------------------------------
     // Phase 1: Subscribe to the DLQ topic for out-of-band monitoring.
@@ -90,8 +92,9 @@ async fn main() -> mitiflow::Result<()> {
     // or "reprocessing worker").  Here we use a raw Zenoh subscriber so we can
     // observe DLQ messages independently of the main subscriber.
     // -------------------------------------------------------------------------
-    let dlq_monitor = session
-        .declare_subscriber(format!("{DLQ_PREFIX}/**"))
+    let dlq_monitor = domain
+        .session()
+        .declare_subscriber(format!("{dlq_prefix}/**"))
         .await
         .unwrap();
 
@@ -102,18 +105,18 @@ async fn main() -> mitiflow::Result<()> {
     //   - max_retries = 3  (4th attempt routes to DLQ)
     //   - Exponential backoff: 30 ms → 60 ms → 120 ms, capped at 200 ms
     // -------------------------------------------------------------------------
-    let subscriber = EventSubscriber::new(&session, config.clone()).await?;
-    let publisher = EventPublisher::new(&session, config).await?;
+    let subscriber = EventSubscriber::new(domain.session(), config.clone()).await?;
+    let publisher = EventPublisher::new(domain.session(), config).await?;
 
     let dlq_config = DlqConfig {
         max_retries: 3,
-        dlq_key_prefix: DLQ_PREFIX.to_string(),
+        dlq_key_prefix: dlq_prefix,
         retry_backoff: BackoffStrategy::Exponential {
             base: Duration::from_millis(30),
             max: Duration::from_millis(200),
         },
     };
-    let mut dlq = DeadLetterQueue::new(&session, dlq_config);
+    let mut dlq = DeadLetterQueue::new(domain.session(), dlq_config);
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -269,9 +272,10 @@ async fn main() -> mitiflow::Result<()> {
 
     // Cleanup
     drop(dlq_monitor);
+    drop(dlq);
     drop(publisher);
     drop(subscriber);
-    session.close().await.unwrap();
+    domain.shutdown().await?;
 
     println!("Done.");
     Ok(())

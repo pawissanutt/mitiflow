@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use mitiflow::{
     Event, EventBusConfig, EventPublisher, EventStore, EventSubscriber, FjallBackend,
-    HeartbeatMode, store::QueryFilters,
+    HeartbeatMode, MitiflowDomain, store::QueryFilters,
 };
 
 /// A metric data point collected from a host.
@@ -28,8 +28,9 @@ struct MetricPoint {
     value: f64,
 }
 
-fn build_config() -> mitiflow::Result<EventBusConfig> {
-    EventBusConfig::builder("demo/metrics")
+fn build_config(domain: &MitiflowDomain) -> mitiflow::Result<EventBusConfig> {
+    domain
+        .event_bus_config("metrics")?
         .cache_size(500)
         .heartbeat(HeartbeatMode::Periodic(Duration::from_millis(200)))
         .watermark_interval(Duration::from_millis(50))
@@ -169,24 +170,27 @@ async fn main() -> mitiflow::Result<()> {
         .with_env_filter("mitiflow=info,event_store=info")
         .init();
 
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::builder("examples-event-store")
+        .open()
+        .await?;
     let store_dir = tempfile::tempdir().expect("failed to create temp dir");
     println!("Store directory: {:?}", store_dir.path());
 
-    let config = build_config()?;
+    let config = build_config(&domain)?;
     let num_events = 20u64;
 
     let (store, publisher, subscriber) =
-        setup_store_and_pubsub(&session, &config, store_dir.path()).await?;
+        setup_store_and_pubsub(domain.session(), &config, store_dir.path()).await?;
     publish_durable_events(&publisher, num_events).await?;
     drain_live_stream(&subscriber, num_events).await?;
     run_store_queries(&store).await?;
     run_maintenance(&store).await?;
 
-    store.shutdown();
     drop(publisher);
     drop(subscriber);
-    session.close().await.unwrap();
+    store.shutdown();
+    drop(store);
+    domain.shutdown().await?;
 
     println!("\nDone — {num_events} events durably committed, queried, and verified.");
     Ok(())

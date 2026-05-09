@@ -1,6 +1,6 @@
 # Configuration Reference
 
-Complete reference for all `EventBusConfig` builder options, consumer group settings, and offload tuning.
+Complete reference for `MitiflowDomain` configuration, `EventBusConfig` builder options, consumer group settings, and offload tuning.
 
 > **Quick start:** See [Getting Started](getting_started.md) for usage examples. This page is for tuning and reference.
 
@@ -8,11 +8,46 @@ Complete reference for all `EventBusConfig` builder options, consumer group sett
 
 ## Table of Contents
 
-1. [EventBusConfig Builder](#eventbusconfig-builder)
-2. [Consumer Group Config](#consumer-group-config)
-3. [Offload Config](#offload-config)
-4. [Codec Selection](#codec-selection)
-5. [Common Configurations](#common-configurations)
+1. [Domain Configuration](#domain-configuration)
+2. [EventBusConfig Builder](#eventbusconfig-builder)
+3. [Consumer Group Config](#consumer-group-config)
+4. [Offload Config](#offload-config)
+5. [Codec Selection](#codec-selection)
+6. [Schema Validation](#schema-validation)
+7. [Common Configurations](#common-configurations)
+
+---
+
+## Domain Configuration
+
+`MitiflowDomain` is the recommended entry point for every Mitiflow program. It opens a Zenoh session, validates the namespace, and selects a transport profile.
+
+```rust
+use mitiflow::{MitiflowDomain, TransportProfile};
+
+let domain = MitiflowDomain::builder("myapp")
+    .transport(TransportProfile::LocalIsolated)
+    .open()
+    .await?;
+```
+
+| Builder method | Default | Description |
+|----------------|---------|-------------|
+| `.transport(TransportProfile)` | `LocalIsolated` | `LocalIsolated`, `Client { connect }`, `PeerMesh { connect }`, or `Ambient` |
+| `.namespace(Namespace)` | `mitiflow/{domain_id}` | Root Zenoh key prefix for the domain |
+
+Derive event-bus configs from the domain instead of literal key prefixes:
+
+```rust
+let config = domain.event_bus_config("events")?
+    .codec(CodecFormat::Postcard)
+    .num_partitions(8)
+    .build()?;
+```
+
+This produces the key prefix `mitiflow/myapp/topics/events` by default. Override the namespace with `.namespace(Namespace::from_root("myapp/prod")?)` if you need a custom root.
+
+See [Domains & Transport](21_domains.md) for transport profiles, namespaces, YAML/env schema, and migration from raw `zenoh::open` setups.
 
 ---
 
@@ -156,8 +191,8 @@ Controls whether publishers and subscribers validate their configuration against
 Skip the builder entirely and load config from the registry:
 
 ```rust
-let config = EventBusConfig::from_topic(&session, "myapp/events", "orders").await?;
-let publisher = EventPublisher::new(&session, config).await?;
+let config = EventBusConfig::from_topic(domain.session(), "myapp/events", "orders").await?;
+let publisher = EventPublisher::new(domain.session(), config).await?;
 ```
 
 ### Validated Fields

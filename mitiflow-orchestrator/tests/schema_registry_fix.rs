@@ -18,15 +18,10 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use mitiflow::schema::fetch_schema_with_timeout;
-use mitiflow::{CodecFormat, KeyFormat, TopicSchema};
+use mitiflow::{CodecFormat, KeyFormat, MitiflowDomain, TopicSchema};
 use mitiflow_orchestrator::config::{CompactionPolicy, RetentionPolicy, TopicConfig};
 use mitiflow_orchestrator::orchestrator::{Orchestrator, OrchestratorConfig};
 use mitiflow_storage::{AgentConfig, SchemaStore, StorageAgent, TopicEntry};
-
-/// Unique key prefix per test to avoid cross-talk.
-fn unique_prefix(test: &str) -> String {
-    format!("test/schema_fix_{test}_{}", uuid::Uuid::now_v7())
-}
 
 fn make_topic_config(name: &str, key_prefix: &str) -> TopicConfig {
     TopicConfig {
@@ -53,14 +48,16 @@ fn make_topic_config(name: &str, key_prefix: &str) -> TopicConfig {
 /// a single root `_schema` queryable that never matched per-topic keys.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn orchestrator_serves_exact_per_topic_schema_query() {
-    let prefix = unique_prefix("orch_exact_query");
+    let domain = MitiflowDomain::isolated_for_test("orch_exact_query")
+        .await
+        .unwrap();
+    let prefix = domain.namespace().root().to_string();
     let topic_prefix = format!("{prefix}/workflows");
 
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
     let dir = tempfile::tempdir().unwrap();
 
     let mut orch = Orchestrator::new(
-        &session,
+        domain.session(),
         OrchestratorConfig {
             key_prefix: prefix.clone(),
             data_dir: dir.path().to_path_buf(),
@@ -82,7 +79,7 @@ async fn orchestrator_serves_exact_per_topic_schema_query() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Query the exact per-topic schema key — this must succeed
-    let schema = fetch_schema_with_timeout(&session, &topic_prefix, Duration::from_secs(2))
+    let schema = fetch_schema_with_timeout(domain.session(), &topic_prefix, Duration::from_secs(2))
         .await
         .expect("orchestrator should answer exact per-topic schema query");
 
@@ -93,23 +90,25 @@ async fn orchestrator_serves_exact_per_topic_schema_query() {
     assert_eq!(schema.key_format, KeyFormat::Keyed);
 
     orch.shutdown().await;
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 /// When the orchestrator manages multiple topics with different key prefixes,
 /// querying each topic's exact `_schema` key must return the correct schema.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn orchestrator_serves_multiple_topic_schemas() {
-    let prefix = unique_prefix("orch_multi");
+    let domain = MitiflowDomain::isolated_for_test("orch_multi")
+        .await
+        .unwrap();
+    let prefix = domain.namespace().root().to_string();
     let wf_prefix = format!("{prefix}/workflows");
     let steps_prefix = format!("{prefix}/steps");
     let events_prefix = format!("{prefix}/events");
 
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
     let dir = tempfile::tempdir().unwrap();
 
     let mut orch = Orchestrator::new(
-        &session,
+        domain.session(),
         OrchestratorConfig {
             key_prefix: prefix.clone(),
             data_dir: dir.path().to_path_buf(),
@@ -136,37 +135,41 @@ async fn orchestrator_serves_multiple_topic_schemas() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Each topic must be independently queryable
-    let wf_schema = fetch_schema_with_timeout(&session, &wf_prefix, Duration::from_secs(2))
+    let wf_schema = fetch_schema_with_timeout(domain.session(), &wf_prefix, Duration::from_secs(2))
         .await
         .expect("workflows schema query failed");
     assert_eq!(wf_schema.name, "workflows");
 
-    let steps_schema = fetch_schema_with_timeout(&session, &steps_prefix, Duration::from_secs(2))
-        .await
-        .expect("steps schema query failed");
+    let steps_schema =
+        fetch_schema_with_timeout(domain.session(), &steps_prefix, Duration::from_secs(2))
+            .await
+            .expect("steps schema query failed");
     assert_eq!(steps_schema.name, "steps");
 
-    let events_schema = fetch_schema_with_timeout(&session, &events_prefix, Duration::from_secs(2))
-        .await
-        .expect("events schema query failed");
+    let events_schema =
+        fetch_schema_with_timeout(domain.session(), &events_prefix, Duration::from_secs(2))
+            .await
+            .expect("events schema query failed");
     assert_eq!(events_schema.name, "events");
 
     orch.shutdown().await;
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 /// Repeated queries for the same schema must return consistent wire-level
 /// metadata (name, codec, partitions, version).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn orchestrator_schema_replies_are_consistent() {
-    let prefix = unique_prefix("orch_stable");
+    let domain = MitiflowDomain::isolated_for_test("orch_stable")
+        .await
+        .unwrap();
+    let prefix = domain.namespace().root().to_string();
     let topic_prefix = format!("{prefix}/workflows");
 
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
     let dir = tempfile::tempdir().unwrap();
 
     let mut orch = Orchestrator::new(
-        &session,
+        domain.session(),
         OrchestratorConfig {
             key_prefix: prefix.clone(),
             data_dir: dir.path().to_path_buf(),
@@ -185,15 +188,17 @@ async fn orchestrator_schema_replies_are_consistent() {
     orch.run().await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let schema1 = fetch_schema_with_timeout(&session, &topic_prefix, Duration::from_secs(2))
-        .await
-        .unwrap();
+    let schema1 =
+        fetch_schema_with_timeout(domain.session(), &topic_prefix, Duration::from_secs(2))
+            .await
+            .unwrap();
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let schema2 = fetch_schema_with_timeout(&session, &topic_prefix, Duration::from_secs(2))
-        .await
-        .unwrap();
+    let schema2 =
+        fetch_schema_with_timeout(domain.session(), &topic_prefix, Duration::from_secs(2))
+            .await
+            .unwrap();
 
     // Wire-level contract must be stable
     assert_eq!(schema1.name, schema2.name);
@@ -203,17 +208,19 @@ async fn orchestrator_schema_replies_are_consistent() {
     assert_eq!(schema1.schema_version, schema2.schema_version);
 
     orch.shutdown().await;
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 /// Bootstrapped topics with default schema_version must be normalized to
 /// version >= 1. Version 0 is reserved for "unset" and must never be served.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn orchestrator_never_serves_schema_version_zero() {
-    let prefix = unique_prefix("orch_no_v0");
+    let domain = MitiflowDomain::isolated_for_test("orch_no_v0")
+        .await
+        .unwrap();
+    let prefix = domain.namespace().root().to_string();
     let topic_prefix = format!("{prefix}/workflows");
 
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
     let dir = tempfile::tempdir().unwrap();
 
     // Create a topic with schema_version=0 (simulates YAML bootstrap default)
@@ -221,7 +228,7 @@ async fn orchestrator_never_serves_schema_version_zero() {
     topic.schema_version = 0;
 
     let mut orch = Orchestrator::new(
-        &session,
+        domain.session(),
         OrchestratorConfig {
             key_prefix: prefix.clone(),
             data_dir: dir.path().to_path_buf(),
@@ -238,7 +245,7 @@ async fn orchestrator_never_serves_schema_version_zero() {
     orch.run().await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let schema = fetch_schema_with_timeout(&session, &topic_prefix, Duration::from_secs(2))
+    let schema = fetch_schema_with_timeout(domain.session(), &topic_prefix, Duration::from_secs(2))
         .await
         .unwrap();
 
@@ -249,20 +256,22 @@ async fn orchestrator_never_serves_schema_version_zero() {
     );
 
     orch.shutdown().await;
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 /// A topic created AFTER `run()` must also be queryable immediately.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn orchestrator_schema_queryable_for_dynamically_created_topic() {
-    let prefix = unique_prefix("orch_dynamic");
+    let domain = MitiflowDomain::isolated_for_test("orch_dynamic")
+        .await
+        .unwrap();
+    let prefix = domain.namespace().root().to_string();
     let topic_prefix = format!("{prefix}/new_topic");
 
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
     let dir = tempfile::tempdir().unwrap();
 
     let mut orch = Orchestrator::new(
-        &session,
+        domain.session(),
         OrchestratorConfig {
             key_prefix: prefix.clone(),
             data_dir: dir.path().to_path_buf(),
@@ -284,14 +293,14 @@ async fn orchestrator_schema_queryable_for_dynamically_created_topic() {
         .unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let schema = fetch_schema_with_timeout(&session, &topic_prefix, Duration::from_secs(2))
+    let schema = fetch_schema_with_timeout(domain.session(), &topic_prefix, Duration::from_secs(2))
         .await
         .expect("dynamically created topic should be queryable");
 
     assert_eq!(schema.name, "new_topic");
 
     orch.shutdown().await;
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 // ==========================================================================
@@ -303,15 +312,18 @@ async fn orchestrator_schema_queryable_for_dynamically_created_topic() {
 /// on pub/sub timing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn storage_agent_bootstraps_schema_from_orchestrator() {
-    let prefix = unique_prefix("storage_bootstrap");
+    let parent = MitiflowDomain::isolated_for_test("storage_bootstrap")
+        .await
+        .unwrap();
+    let prefix = parent.namespace().root().to_string();
     let topic_prefix = format!("{prefix}/workflows");
 
     // Start orchestrator with a topic
-    let orch_session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let orch_domain = parent.join_isolated().await.unwrap();
     let orch_dir = tempfile::tempdir().unwrap();
 
     let mut orch = Orchestrator::new(
-        &orch_session,
+        orch_domain.session(),
         OrchestratorConfig {
             key_prefix: prefix.clone(),
             data_dir: orch_dir.path().to_path_buf(),
@@ -332,7 +344,7 @@ async fn storage_agent_bootstraps_schema_from_orchestrator() {
 
     // Start storage agent AFTER orchestrator — simulates the race scenario.
     // The storage agent missed publish_all_schemas() but should bootstrap by query.
-    let agent_session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let agent_domain = parent.join_isolated().await.unwrap();
     let agent_dir = tempfile::tempdir().unwrap();
 
     let agent_config = AgentConfig::builder(agent_dir.path().to_path_buf())
@@ -347,7 +359,7 @@ async fn storage_agent_bootstraps_schema_from_orchestrator() {
         .build()
         .unwrap();
 
-    let mut agent = StorageAgent::start_multi(&agent_session, agent_config)
+    let mut agent = StorageAgent::start_multi(agent_domain.session(), agent_config)
         .await
         .unwrap();
 
@@ -375,23 +387,27 @@ async fn storage_agent_bootstraps_schema_from_orchestrator() {
     assert_eq!(stored.codec, CodecFormat::Postcard);
 
     orch.shutdown().await;
-    agent_session.close().await.unwrap();
-    orch_session.close().await.unwrap();
+    agent_domain.shutdown().await.unwrap();
+    orch_domain.shutdown().await.unwrap();
+    parent.shutdown().await.unwrap();
 }
 
 /// After a storage agent has warmed up from the orchestrator, it must serve
 /// schema queries itself — even if the orchestrator goes down.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn storage_agent_serves_schema_after_orchestrator_shutdown() {
-    let prefix = unique_prefix("storage_serve");
+    let parent = MitiflowDomain::isolated_for_test("storage_serve")
+        .await
+        .unwrap();
+    let prefix = parent.namespace().root().to_string();
     let topic_prefix = format!("{prefix}/workflows");
 
     // Start orchestrator, create topic
-    let orch_session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let orch_domain = parent.join_isolated().await.unwrap();
     let orch_dir = tempfile::tempdir().unwrap();
 
     let mut orch = Orchestrator::new(
-        &orch_session,
+        orch_domain.session(),
         OrchestratorConfig {
             key_prefix: prefix.clone(),
             data_dir: orch_dir.path().to_path_buf(),
@@ -411,7 +427,7 @@ async fn storage_agent_serves_schema_after_orchestrator_shutdown() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Start storage agent, let it bootstrap
-    let agent_session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let agent_domain = parent.join_isolated().await.unwrap();
     let agent_dir = tempfile::tempdir().unwrap();
 
     let agent_config = AgentConfig::builder(agent_dir.path().to_path_buf())
@@ -426,7 +442,7 @@ async fn storage_agent_serves_schema_after_orchestrator_shutdown() {
         .build()
         .unwrap();
 
-    let mut agent = StorageAgent::start_multi(&agent_session, agent_config)
+    let mut agent = StorageAgent::start_multi(agent_domain.session(), agent_config)
         .await
         .unwrap();
 
@@ -434,35 +450,43 @@ async fn storage_agent_serves_schema_after_orchestrator_shutdown() {
     // removing the orchestrator. A fixed sleep made this test race on slower CI
     // runners: the agent could still be bootstrapping when the only upstream
     // schema source was shut down.
-    fetch_schema_with_timeout(&agent_session, &topic_prefix, Duration::from_secs(5))
-        .await
-        .expect("storage agent should finish schema bootstrap before orchestrator shutdown");
+    fetch_schema_with_timeout(
+        agent_domain.session(),
+        &topic_prefix,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("storage agent should finish schema bootstrap before orchestrator shutdown");
 
     // Shut down orchestrator
     orch.shutdown().await;
-    orch_session.close().await.unwrap();
+    orch_domain.shutdown().await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Query from a fresh session — only storage agent can respond now
-    let client_session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let schema = fetch_schema_with_timeout(&client_session, &topic_prefix, Duration::from_secs(2))
-        .await
-        .expect("storage agent should serve schema after orchestrator shutdown");
+    let client_domain = parent.join_isolated().await.unwrap();
+    let schema = fetch_schema_with_timeout(
+        client_domain.session(),
+        &topic_prefix,
+        Duration::from_secs(2),
+    )
+    .await
+    .expect("storage agent should serve schema after orchestrator shutdown");
 
     assert_eq!(schema.name, "workflows");
     assert_eq!(schema.codec, CodecFormat::Postcard);
 
     agent.shutdown().await.unwrap();
-    client_session.close().await.unwrap();
-    agent_session.close().await.unwrap();
+    client_domain.shutdown().await.unwrap();
+    agent_domain.shutdown().await.unwrap();
+    parent.shutdown().await.unwrap();
 }
 
 /// Idempotent same-version republish: restarting a storage agent with an
 /// existing volume should NOT produce stale-version rejections or warnings.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn storage_schema_idempotent_same_version_republish() {
-    let prefix = unique_prefix("storage_idempotent");
-    let topic_prefix = format!("{prefix}/workflows");
+    let topic_prefix = format!("schema_idempotent_{}/workflows", uuid::Uuid::now_v7());
 
     // Pre-populate the schema store to simulate a restart with existing volume
     let agent_dir = tempfile::tempdir().unwrap();
@@ -502,8 +526,7 @@ async fn storage_schema_idempotent_same_version_republish() {
 /// Same version but different wire contract must be rejected as a conflict.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn storage_schema_rejects_same_version_different_content() {
-    let prefix = unique_prefix("storage_conflict");
-    let topic_prefix = format!("{prefix}/workflows");
+    let topic_prefix = format!("schema_conflict_{}/workflows", uuid::Uuid::now_v7());
 
     let agent_dir = tempfile::tempdir().unwrap();
     let schema_dir = agent_dir.path().join("_schemas");

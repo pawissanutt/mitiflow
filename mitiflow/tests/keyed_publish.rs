@@ -12,9 +12,11 @@ use std::time::Duration;
 use common::TestPayload;
 use mitiflow::{Event, EventBusConfig, EventPublisher, EventSubscriber, HeartbeatMode};
 
-/// Create config with unique prefix and low partition count for deterministic tests.
-fn keyed_config(test_name: &str) -> EventBusConfig {
-    EventBusConfig::builder(format!("test/{test_name}"))
+/// Create config with the given domain's namespace and 16 partitions.
+fn keyed_config(domain: &mitiflow::MitiflowDomain) -> EventBusConfig {
+    domain
+        .event_bus_config("events")
+        .expect("valid topic")
         .cache_size(1000)
         .heartbeat(HeartbeatMode::Periodic(Duration::from_millis(200)))
         .history_on_subscribe(false)
@@ -25,12 +27,12 @@ fn keyed_config(test_name: &str) -> EventBusConfig {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publish_keyed_delivers_to_subscriber() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let config = keyed_config("keyed_deliver");
-    let subscriber = EventSubscriber::new(&session, config.clone())
+    let domain = common::isolated_domain("keyed_deliver").await;
+    let config = keyed_config(&domain);
+    let subscriber = EventSubscriber::new(domain.session(), config.clone())
         .await
         .unwrap();
-    let publisher = EventPublisher::new(&session, config).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let event = Event::new(TestPayload { value: 42 });
@@ -45,17 +47,17 @@ async fn publish_keyed_delivers_to_subscriber() {
     assert_eq!(received.payload.value, 42);
     drop(subscriber);
     drop(publisher);
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publish_keyed_key_in_key_expr() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let config = keyed_config("keyed_key_expr");
-    let subscriber = EventSubscriber::new(&session, config.clone())
+    let domain = common::isolated_domain("keyed_key_expr").await;
+    let config = keyed_config(&domain);
+    let subscriber = EventSubscriber::new(domain.session(), config.clone())
         .await
         .unwrap();
-    let publisher = EventPublisher::new(&session, config).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let event = Event::new(TestPayload { value: 1 });
@@ -73,17 +75,17 @@ async fn publish_keyed_key_in_key_expr() {
     );
     drop(subscriber);
     drop(publisher);
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publish_keyed_partition_affinity() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let config = keyed_config("keyed_affinity");
-    let subscriber = EventSubscriber::new(&session, config.clone())
+    let domain = common::isolated_domain("keyed_affinity").await;
+    let config = keyed_config(&domain);
+    let subscriber = EventSubscriber::new(domain.session(), config.clone())
         .await
         .unwrap();
-    let publisher = EventPublisher::new(&session, config).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Publish same key 5 times — all should go to same partition
@@ -111,17 +113,17 @@ async fn publish_keyed_partition_affinity() {
     );
     drop(subscriber);
     drop(publisher);
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publish_keyed_and_unkeyed_coexist() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let config = keyed_config("keyed_coexist");
-    let subscriber = EventSubscriber::new(&session, config.clone())
+    let domain = common::isolated_domain("keyed_coexist").await;
+    let config = keyed_config(&domain);
+    let subscriber = EventSubscriber::new(domain.session(), config.clone())
         .await
         .unwrap();
-    let publisher = EventPublisher::new(&session, config).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Publish 1 unkeyed + 1 keyed
@@ -154,17 +156,19 @@ async fn publish_keyed_and_unkeyed_coexist() {
     );
     drop(subscriber);
     drop(publisher);
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publish_keyed_key_filter_subscribe() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = common::isolated_domain("keyed_filter").await;
 
     // Use a config WITHOUT heartbeat/recovery for the filtered subscriber,
     // because gap recovery would pull in the "beta" event to fill a sequence
     // gap, bypassing Zenoh key expression filtering.
-    let sub_config = EventBusConfig::builder("test/keyed_filter")
+    let sub_config = domain
+        .event_bus_config("events")
+        .expect("valid topic")
         .cache_size(1000)
         .heartbeat(HeartbeatMode::Disabled)
         .history_on_subscribe(false)
@@ -172,16 +176,18 @@ async fn publish_keyed_key_filter_subscribe() {
         .build()
         .expect("valid config");
 
-    let pub_config = keyed_config("keyed_filter");
+    let pub_config = keyed_config(&domain);
 
     // Create a filtered subscriber for key "alpha" only
     let filter_key_expr = sub_config.key_expr_for_key("alpha");
     let filtered_sub =
-        EventSubscriber::init_with_key_exprs(&session, sub_config, &[filter_key_expr])
+        EventSubscriber::init_with_key_exprs(domain.session(), sub_config, &[filter_key_expr])
             .await
             .unwrap();
 
-    let publisher = EventPublisher::new(&session, pub_config).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), pub_config)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Publish to "alpha" and "beta"
@@ -216,17 +222,17 @@ async fn publish_keyed_key_filter_subscribe() {
 
     drop(filtered_sub);
     drop(publisher);
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publish_keyed_roundtrip_raw_event_key() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let config = keyed_config("keyed_roundtrip");
-    let subscriber = EventSubscriber::new(&session, config.clone())
+    let domain = common::isolated_domain("keyed_roundtrip").await;
+    let config = keyed_config(&domain);
+    let subscriber = EventSubscriber::new(domain.session(), config.clone())
         .await
         .unwrap();
-    let publisher = EventPublisher::new(&session, config).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     publisher
@@ -242,17 +248,17 @@ async fn publish_keyed_roundtrip_raw_event_key() {
     assert_eq!(raw.key(), Some("user/42/orders"));
     drop(subscriber);
     drop(publisher);
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publish_bytes_keyed_works() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let config = keyed_config("bytes_keyed");
-    let subscriber = EventSubscriber::new(&session, config.clone())
+    let domain = common::isolated_domain("bytes_keyed").await;
+    let config = keyed_config(&domain);
+    let subscriber = EventSubscriber::new(domain.session(), config.clone())
         .await
         .unwrap();
-    let publisher = EventPublisher::new(&session, config).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let payload = vec![1u8, 2, 3, 4, 5];
@@ -270,14 +276,14 @@ async fn publish_bytes_keyed_works() {
     assert_eq!(raw.payload, payload);
     drop(subscriber);
     drop(publisher);
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publish_keyed_sequence_increments() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let config = keyed_config("keyed_seq");
-    let publisher = EventPublisher::new(&session, config).await.unwrap();
+    let domain = common::isolated_domain("keyed_seq").await;
+    let config = keyed_config(&domain);
+    let publisher = EventPublisher::new(domain.session(), config).await.unwrap();
 
     let receipt0 = publisher
         .publish_keyed("seq-key", &Event::new(TestPayload { value: 0 }))
@@ -306,14 +312,14 @@ async fn publish_keyed_sequence_increments() {
         receipt1.seq
     );
     drop(publisher);
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publish_keyed_validates_key() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let config = keyed_config("keyed_validate");
-    let publisher = EventPublisher::new(&session, config).await.unwrap();
+    let domain = common::isolated_domain("keyed_validate").await;
+    let config = keyed_config(&domain);
+    let publisher = EventPublisher::new(domain.session(), config).await.unwrap();
 
     let event = Event::new(TestPayload { value: 0 });
 
@@ -334,15 +340,17 @@ async fn publish_keyed_validates_key() {
     assert!(result.is_ok());
 
     drop(publisher);
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn subscriber_new_keyed_receives_only_matching_key() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = common::isolated_domain("sub_new_keyed").await;
 
     // Disable heartbeat/recovery to avoid gap recovery pulling in filtered-out events.
-    let config = EventBusConfig::builder("test/sub_new_keyed")
+    let config = domain
+        .event_bus_config("events")
+        .expect("valid topic")
         .cache_size(1000)
         .heartbeat(HeartbeatMode::Disabled)
         .history_on_subscribe(false)
@@ -350,10 +358,10 @@ async fn subscriber_new_keyed_receives_only_matching_key() {
         .build()
         .expect("valid config");
 
-    let sub = EventSubscriber::new_keyed(&session, config.clone(), "order-A")
+    let sub = EventSubscriber::new_keyed(domain.session(), config.clone(), "order-A")
         .await
         .unwrap();
-    let publisher = EventPublisher::new(&session, config).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     publisher
@@ -384,14 +392,16 @@ async fn subscriber_new_keyed_receives_only_matching_key() {
 
     drop(sub);
     drop(publisher);
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn subscriber_new_key_prefix_receives_matching() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = common::isolated_domain("sub_key_prefix").await;
 
-    let config = EventBusConfig::builder("test/sub_key_prefix")
+    let config = domain
+        .event_bus_config("events")
+        .expect("valid topic")
         .cache_size(1000)
         .heartbeat(HeartbeatMode::Disabled)
         .history_on_subscribe(false)
@@ -399,10 +409,10 @@ async fn subscriber_new_key_prefix_receives_matching() {
         .build()
         .expect("valid config");
 
-    let sub = EventSubscriber::new_key_prefix(&session, config.clone(), "user/1")
+    let sub = EventSubscriber::new_key_prefix(domain.session(), config.clone(), "user/1")
         .await
         .unwrap();
-    let publisher = EventPublisher::new(&session, config).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     publisher
@@ -436,7 +446,7 @@ async fn subscriber_new_key_prefix_receives_matching() {
 
     drop(sub);
     drop(publisher);
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[cfg(feature = "fjall-backend")]
@@ -445,8 +455,10 @@ mod durable_keyed {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn publish_keyed_durable_confirmed() {
-        let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-        let config = EventBusConfig::builder("test/keyed_durable")
+        let domain = common::isolated_domain("keyed_durable").await;
+        let config = domain
+            .event_bus_config("events")
+            .unwrap()
             .cache_size(1000)
             .heartbeat(HeartbeatMode::Periodic(Duration::from_millis(200)))
             .history_on_subscribe(false)
@@ -459,9 +471,11 @@ mod durable_keyed {
 
         let tmp = common::temp_dir("keyed_durable");
         let backend = mitiflow::FjallBackend::open(tmp.path(), 0).unwrap();
-        let mut store = mitiflow::EventStore::new(&session, backend, config.clone());
+        let mut store = mitiflow::EventStore::new(domain.session(), backend, config.clone());
         store.run().await.unwrap();
-        let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
+        let publisher = EventPublisher::new(domain.session(), config.clone())
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         let event = Event::new(TestPayload { value: 99 });
@@ -474,13 +488,15 @@ mod durable_keyed {
 
         drop(store);
         drop(publisher);
-        session.close().await.unwrap();
+        domain.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn publish_bytes_keyed_durable_works() {
-        let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-        let config = EventBusConfig::builder("test/bytes_keyed_durable")
+        let domain = common::isolated_domain("bytes_keyed_durable").await;
+        let config = domain
+            .event_bus_config("events")
+            .unwrap()
             .cache_size(1000)
             .heartbeat(HeartbeatMode::Periodic(Duration::from_millis(200)))
             .history_on_subscribe(false)
@@ -493,9 +509,11 @@ mod durable_keyed {
 
         let tmp = common::temp_dir("bytes_keyed_durable");
         let backend = mitiflow::FjallBackend::open(tmp.path(), 0).unwrap();
-        let mut store = mitiflow::EventStore::new(&session, backend, config.clone());
+        let mut store = mitiflow::EventStore::new(domain.session(), backend, config.clone());
         store.run().await.unwrap();
-        let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
+        let publisher = EventPublisher::new(domain.session(), config.clone())
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         let payload = vec![10u8, 20, 30];
@@ -508,7 +526,7 @@ mod durable_keyed {
 
         drop(store);
         drop(publisher);
-        session.close().await.unwrap();
+        domain.shutdown().await.unwrap();
     }
 
     /// End-to-end: publish keyed → store → query_by_key returns it.
@@ -516,8 +534,10 @@ mod durable_keyed {
     async fn store_query_by_key_e2e() {
         use mitiflow::store::backend::StorageBackend;
 
-        let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-        let config = EventBusConfig::builder("test/store_query_by_key")
+        let domain = common::isolated_domain("store_query_by_key").await;
+        let config = domain
+            .event_bus_config("events")
+            .unwrap()
             .cache_size(1000)
             .heartbeat(HeartbeatMode::Periodic(Duration::from_millis(200)))
             .history_on_subscribe(false)
@@ -531,9 +551,12 @@ mod durable_keyed {
         let tmp = common::temp_dir("store_query_by_key");
         let backend: std::sync::Arc<dyn StorageBackend> =
             std::sync::Arc::new(mitiflow::FjallBackend::open(tmp.path(), 0).unwrap());
-        let mut store = mitiflow::EventStore::new(&session, backend.clone(), config.clone());
+        let mut store =
+            mitiflow::EventStore::new(domain.session(), backend.clone(), config.clone());
         store.run().await.unwrap();
-        let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
+        let publisher = EventPublisher::new(domain.session(), config.clone())
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // Publish keyed events
@@ -564,6 +587,6 @@ mod durable_keyed {
 
         drop(store);
         drop(publisher);
-        session.close().await.unwrap();
+        domain.shutdown().await.unwrap();
     }
 }

@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use mitiflow::MitiflowDomain;
 use mitiflow_storage::{AgentConfig, AgentConfigBuilder, StorageAgent, TopicEntry};
 
 fn multi_config(
@@ -33,14 +34,18 @@ fn multi_config(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_multi_topic_starts_all() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("amt_start")
+        .await
+        .unwrap();
     let (_tmp, config) = multi_config(
         "amt_start",
         "node-only",
         vec![("events", 4, 1), ("logs", 3, 1)],
     );
 
-    let mut agent = StorageAgent::start_multi(&session, config).await.unwrap();
+    let mut agent = StorageAgent::start_multi(domain.session(), config)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let topics = agent.topics().await;
@@ -51,15 +56,17 @@ async fn agent_multi_topic_starts_all() {
     assert_eq!(all_parts.len(), 7, "4 + 3 = 7 partitions total");
 
     agent.shutdown().await.unwrap();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_multi_topic_add_at_runtime() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("amt_add").await.unwrap();
     let (_tmp, config) = multi_config("amt_add", "node-only", vec![("events", 2, 1)]);
 
-    let mut agent = StorageAgent::start_multi(&session, config).await.unwrap();
+    let mut agent = StorageAgent::start_multi(domain.session(), config)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(agent.topics().await.len(), 1);
 
@@ -78,19 +85,23 @@ async fn agent_multi_topic_add_at_runtime() {
     assert_eq!(parts.len(), 5, "2 + 3 = 5");
 
     agent.shutdown().await.unwrap();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_multi_topic_remove_at_runtime() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("amt_remove")
+        .await
+        .unwrap();
     let (_tmp, config) = multi_config(
         "amt_remove",
         "node-only",
         vec![("events", 4, 1), ("logs", 2, 1)],
     );
 
-    let mut agent = StorageAgent::start_multi(&session, config).await.unwrap();
+    let mut agent = StorageAgent::start_multi(domain.session(), config)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(agent.assigned_partitions().await.len(), 6);
 
@@ -100,19 +111,21 @@ async fn agent_multi_topic_remove_at_runtime() {
     assert_eq!(agent.assigned_partitions().await.len(), 2);
 
     agent.shutdown().await.unwrap();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_multi_topic_two_nodes_independent_topics() {
-    let s1 = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let s2 = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let d1 = MitiflowDomain::isolated_for_test("amt_indep")
+        .await
+        .unwrap();
+    let d2 = d1.join_isolated().await.unwrap();
 
     let (_t1, c1) = multi_config("amt_indep", "node-a", vec![("events", 4, 1)]);
     let (_t2, c2) = multi_config("amt_indep", "node-b", vec![("logs", 3, 1)]);
 
-    let mut a1 = StorageAgent::start_multi(&s1, c1).await.unwrap();
-    let mut a2 = StorageAgent::start_multi(&s2, c2).await.unwrap();
+    let mut a1 = StorageAgent::start_multi(d1.session(), c1).await.unwrap();
+    let mut a2 = StorageAgent::start_multi(d2.session(), c2).await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Each node manages its own topic independently.
@@ -123,21 +136,23 @@ async fn agent_multi_topic_two_nodes_independent_topics() {
 
     a1.shutdown().await.unwrap();
     a2.shutdown().await.unwrap();
-    s1.close().await.unwrap();
-    s2.close().await.unwrap();
+    d2.shutdown().await.unwrap();
+    d1.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_multi_topic_same_topic_two_nodes_splits() {
-    let s1 = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let s2 = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let d1 = MitiflowDomain::isolated_for_test("amt_shared")
+        .await
+        .unwrap();
+    let d2 = d1.join_isolated().await.unwrap();
 
     let (_t1, c1) = multi_config("amt_shared", "node-a", vec![("events", 8, 1)]);
     let (_t2, c2) = multi_config("amt_shared", "node-b", vec![("events", 8, 1)]);
 
-    let mut a1 = StorageAgent::start_multi(&s1, c1).await.unwrap();
+    let mut a1 = StorageAgent::start_multi(d1.session(), c1).await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let mut a2 = StorageAgent::start_multi(&s2, c2).await.unwrap();
+    let mut a2 = StorageAgent::start_multi(d2.session(), c2).await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(1000)).await;
     a1.recompute_and_reconcile().await.unwrap();
@@ -161,8 +176,8 @@ async fn agent_multi_topic_same_topic_two_nodes_splits() {
 
     a1.shutdown().await.unwrap();
     a2.shutdown().await.unwrap();
-    s1.close().await.unwrap();
-    s2.close().await.unwrap();
+    d2.shutdown().await.unwrap();
+    d1.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -170,7 +185,9 @@ async fn agent_backward_compat_single_topic() {
     use mitiflow::EventBusConfig;
     use mitiflow_storage::StorageAgentConfigBuilder;
 
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("amt_compat")
+        .await
+        .unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let bus_config = EventBusConfig::builder("test/amt_compat")
         .cache_size(100)
@@ -185,7 +202,7 @@ async fn agent_backward_compat_single_topic() {
         .build()
         .unwrap();
 
-    let mut agent = StorageAgent::start(&session, config).await.unwrap();
+    let mut agent = StorageAgent::start(domain.session(), config).await.unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     let assigned = agent.assigned_partitions().await;
@@ -197,20 +214,24 @@ async fn agent_backward_compat_single_topic() {
     assert_eq!(agent.topics().await.len(), 1);
 
     agent.shutdown().await.unwrap();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_has_topic() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("amt_has_topic")
+        .await
+        .unwrap();
     let (_tmp, config) = multi_config("amt_has_topic", "node-only", vec![("events", 2, 1)]);
 
-    let mut agent = StorageAgent::start_multi(&session, config).await.unwrap();
+    let mut agent = StorageAgent::start_multi(domain.session(), config)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     assert!(agent.has_topic("events").await);
     assert!(!agent.has_topic("missing").await);
 
     agent.shutdown().await.unwrap();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }

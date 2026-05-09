@@ -10,6 +10,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use mitiflow::{
+    DomainRuntimeConfig, DomainYamlConfig, MitiflowDomain, TransportProfile, TransportYamlConfig,
+};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -41,6 +44,10 @@ enum Commands {
 
     /// Admin CLI for cluster management.
     Ctl {
+        /// Zenoh endpoint to connect to (defaults to a local isolated domain).
+        #[arg(long)]
+        connect: Option<String>,
+
         #[command(subcommand)]
         command: CtlCommands,
     },
@@ -89,6 +96,10 @@ enum CtlCommands {
         /// Timeout for queries in seconds.
         #[arg(long, default_value = "5")]
         timeout: u64,
+
+        /// Zenoh endpoint to connect to (defaults to a local isolated domain).
+        #[arg(long)]
+        connect: Option<String>,
     },
     /// Schema registry operations.
     Schema {
@@ -157,17 +168,27 @@ enum SchemaCtlCommands {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
+    if let Err(err) = run().await {
+        eprintln!("Error: {err}");
+        if is_config_error(&err) {
+            std::process::exit(2);
+        }
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
         Commands::Storage { config } => run_storage(config).await,
         Commands::Orchestrator { config } => run_orchestrator(config).await,
-        Commands::Ctl { command } => run_ctl(command).await,
+        Commands::Ctl { connect, command } => run_ctl(command, connect).await,
         Commands::Dev {
             topics,
             config,
@@ -177,15 +198,34 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-async fn run_storage(config_path: Option<PathBuf>) -> anyhow::Result<()> {
-    let session = zenoh::open(zenoh::Config::default())
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+fn is_config_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<mitiflow::Error>()
+            .is_some_and(|err| matches!(err, mitiflow::Error::Domain(_)))
+            || cause
+                .downcast_ref::<mitiflow_storage::AgentError>()
+                .is_some_and(|err| matches!(err, mitiflow_storage::AgentError::Config(_)))
+    })
+}
 
-    let mut agent = if let Some(path) = config_path {
-        let yaml = mitiflow_storage::AgentYamlConfig::from_file(&path)?;
-        let agent_config = yaml.into_agent_config()?;
-        mitiflow_storage::StorageAgent::start_multi(&session, agent_config).await?
+async fn run_storage(config_path: Option<PathBuf>) -> anyhow::Result<()> {
+    let yaml_config = match config_path {
+        Some(path) => Some(mitiflow_storage::AgentYamlConfig::from_file(&path)?),
+        None => None,
+    };
+
+    let domain = open_cli_domain(
+        "cli-storage",
+        yaml_config.as_ref().map(|config| &config.domain),
+        yaml_config.as_ref().map(|config| &config.transport),
+        None,
+    )
+    .await?;
+
+    let mut agent = if let Some(yaml_config) = yaml_config {
+        let agent_config = yaml_config.into_agent_config()?;
+        mitiflow_storage::StorageAgent::start_multi(domain.session(), agent_config).await?
     } else {
         // Env-var fallback
         let key_prefix = std::env::var("MITIFLOW_KEY_PREFIX").unwrap_or_else(|_| "mitiflow".into());
@@ -214,27 +254,41 @@ async fn run_storage(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         if let Some(id) = node_id {
             builder = builder.node_id(id);
         }
-        mitiflow_storage::StorageAgent::start(&session, builder.build()?).await?
+        mitiflow_storage::StorageAgent::start(domain.session(), builder.build()?).await?
     };
 
     tracing::info!("storage agent running, press Ctrl+C to stop");
     tokio::signal::ctrl_c().await?;
 
     agent.shutdown().await?;
-    session.close().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+    domain.shutdown().await?;
     Ok(())
 }
 
 async fn run_orchestrator(config_path: Option<PathBuf>) -> anyhow::Result<()> {
-    let session = zenoh::open(zenoh::Config::default())
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let yaml_config = match config_path {
+        Some(path) => Some(
+            mitiflow_orchestrator::config::OrchestratorYamlConfig::from_file(&path)
+                .map_err(|e| anyhow::anyhow!("{e}"))?,
+        ),
+        None => None,
+    };
 
-    let orch_config = if let Some(path) = config_path {
-        let content = std::fs::read_to_string(&path)?;
-        serde_yaml::from_str::<OrchestratorYamlConfig>(&content)?.into_orch_config()?
+    let domain = open_cli_domain(
+        "cli-orchestrator",
+        yaml_config.as_ref().map(|config| &config.domain),
+        yaml_config.as_ref().map(|config| &config.transport),
+        None,
+    )
+    .await?;
+
+    let orch_config = if let Some(yaml_config) = yaml_config {
+        yaml_config
+            .into_orch_config(domain.namespace().root().to_string())
+            .map_err(|e| anyhow::anyhow!("{e}"))?
     } else {
-        let key_prefix = std::env::var("MITIFLOW_KEY_PREFIX").unwrap_or_else(|_| "mitiflow".into());
+        let key_prefix = std::env::var("MITIFLOW_KEY_PREFIX")
+            .unwrap_or_else(|_| domain.namespace().root().to_string());
         let data_dir = std::env::var("MITIFLOW_DATA_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("./orchestrator_data"));
@@ -256,7 +310,7 @@ async fn run_orchestrator(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         }
     };
 
-    let mut orchestrator = mitiflow_orchestrator::Orchestrator::new(&session, orch_config)
+    let mut orchestrator = mitiflow_orchestrator::Orchestrator::new(domain.session(), orch_config)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     orchestrator
         .run()
@@ -267,14 +321,22 @@ async fn run_orchestrator(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     tokio::signal::ctrl_c().await?;
 
     orchestrator.shutdown().await;
+    domain.shutdown().await?;
     Ok(())
 }
 
-async fn run_ctl(command: CtlCommands) -> anyhow::Result<()> {
+async fn run_ctl(command: CtlCommands, connect: Option<String>) -> anyhow::Result<()> {
     let key_prefix = std::env::var("MITIFLOW_KEY_PREFIX").unwrap_or_else(|_| "mitiflow".into());
-    let session = zenoh::open(zenoh::Config::default())
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let is_diagnose = matches!(command, CtlCommands::Diagnose { .. });
+    let connect = effective_ctl_connect(&command, connect);
+    let transport_override = transport_from_connect(connect)?;
+    let domain_id = if is_diagnose {
+        "cli-diagnose"
+    } else {
+        "cli-ctl"
+    };
+    let domain = open_cli_domain(domain_id, None, None, transport_override).await?;
+    let session = domain.session();
 
     match command {
         CtlCommands::Topics { command } => match command {
@@ -365,15 +427,19 @@ async fn run_ctl(command: CtlCommands) -> anyhow::Result<()> {
                 );
             }
         },
-        CtlCommands::Diagnose { prefix, timeout } => {
-            run_diagnose(&session, &prefix, timeout).await?;
+        CtlCommands::Diagnose {
+            prefix,
+            timeout,
+            connect: _,
+        } => {
+            run_diagnose(session, &prefix, timeout).await?;
         }
         CtlCommands::Schema { command } => {
-            run_schema_ctl(&session, &key_prefix, command).await?;
+            run_schema_ctl(session, &key_prefix, command).await?;
         }
     }
 
-    session.close().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+    domain.shutdown().await?;
     Ok(())
 }
 
@@ -601,9 +667,7 @@ async fn run_dev(
         vec![("default".into(), 4u32, 1u32)]
     };
 
-    let session = zenoh::open(zenoh::Config::default())
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let domain = open_cli_domain("cli-dev", None, None, None).await?;
 
     // Start orchestrator
     let orch_dir = data_dir.join("orchestrator");
@@ -618,7 +682,7 @@ async fn run_dev(
         bootstrap_topics_from: None,
     };
 
-    let mut orchestrator = mitiflow_orchestrator::Orchestrator::new(&session, orch_config)
+    let mut orchestrator = mitiflow_orchestrator::Orchestrator::new(domain.session(), orch_config)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     orchestrator
         .run()
@@ -654,7 +718,8 @@ async fn run_dev(
         .auto_discover_topics(true)
         .build()?;
 
-    let mut agent = mitiflow_storage::StorageAgent::start_multi(&session, agent_config).await?;
+    let mut agent =
+        mitiflow_storage::StorageAgent::start_multi(domain.session(), agent_config).await?;
 
     tracing::info!(
         topics = ?topic_specs.iter().map(|(n,p,r)| format!("{n}:{p}:{r}")).collect::<Vec<_>>(),
@@ -666,8 +731,67 @@ async fn run_dev(
 
     agent.shutdown().await?;
     orchestrator.shutdown().await;
-    session.close().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+    domain.shutdown().await?;
     Ok(())
+}
+
+async fn open_cli_domain(
+    default_id: &str,
+    domain_config: Option<&DomainYamlConfig>,
+    transport_config: Option<&TransportYamlConfig>,
+    transport_override: Option<TransportProfile>,
+) -> anyhow::Result<MitiflowDomain> {
+    let runtime = DomainRuntimeConfig::from_sources_with_transport(
+        default_id,
+        domain_config,
+        transport_config,
+        transport_override,
+    )?;
+    let domain = runtime.open().await?;
+    let transport_profile = format!("{:?}", domain.transport());
+    tracing::info!(
+        domain.id = %domain.id(),
+        namespace.root = %domain.namespace().root(),
+        transport.profile = %transport_profile,
+        "mitiflow domain started domain.id={} namespace.root={} transport.profile={}",
+        domain.id(),
+        domain.namespace().root(),
+        transport_profile
+    );
+    Ok(domain)
+}
+
+fn effective_ctl_connect(command: &CtlCommands, connect: Option<String>) -> Option<String> {
+    match command {
+        CtlCommands::Diagnose {
+            connect: diagnose_connect,
+            ..
+        } => diagnose_connect.clone().or(connect),
+        _ => connect,
+    }
+}
+
+fn transport_from_connect(connect: Option<String>) -> anyhow::Result<Option<TransportProfile>> {
+    match connect {
+        Some(connect) => {
+            let endpoints: Vec<String> = connect
+                .split(',')
+                .map(str::trim)
+                .filter(|endpoint| !endpoint.is_empty())
+                .map(ToOwned::to_owned)
+                .collect();
+            if endpoints.is_empty() {
+                return Err(mitiflow::Error::Domain(
+                    mitiflow::error::DomainError::EmptyEndpoints {
+                        profile: "Client".into(),
+                    },
+                )
+                .into());
+            }
+            Ok(Some(TransportProfile::Client { connect: endpoints }))
+        }
+        None => Ok(None),
+    }
 }
 
 /// Parse `name:partitions:rf` specs (comma-separated).
@@ -694,69 +818,6 @@ fn parse_topic_specs(s: &str) -> anyhow::Result<Vec<(String, u32, u32)>> {
         }
     }
     Ok(specs)
-}
-
-/// YAML config for orchestrator (used by `mitiflow orchestrator --config`).
-#[derive(serde::Deserialize)]
-struct OrchestratorYamlConfig {
-    #[serde(default = "default_key_prefix")]
-    key_prefix: String,
-    #[serde(default = "default_orch_data_dir")]
-    data_dir: PathBuf,
-    #[serde(default = "default_lag_interval")]
-    lag_interval_ms: u64,
-    admin_prefix: Option<String>,
-    /// HTTP API bind address (e.g. "0.0.0.0:8080"). Also settable via `MITIFLOW_HTTP_BIND`.
-    http_bind: Option<String>,
-    /// Bearer token for HTTP API auth. Also settable via `MITIFLOW_AUTH_TOKEN`.
-    auth_token: Option<String>,
-    /// Path to a YAML file with `topics` to bootstrap on startup.
-    /// Also settable via `MITIFLOW_BOOTSTRAP_TOPICS_FROM`.
-    bootstrap_topics_from: Option<PathBuf>,
-}
-
-fn default_key_prefix() -> String {
-    "mitiflow".into()
-}
-fn default_orch_data_dir() -> PathBuf {
-    PathBuf::from("./orchestrator_data")
-}
-fn default_lag_interval() -> u64 {
-    1000
-}
-
-impl OrchestratorYamlConfig {
-    fn into_orch_config(
-        self,
-    ) -> anyhow::Result<mitiflow_orchestrator::orchestrator::OrchestratorConfig> {
-        // Env var takes precedence over YAML config
-        let http_bind = std::env::var("MITIFLOW_HTTP_BIND")
-            .ok()
-            .or(self.http_bind)
-            .and_then(|s| s.parse().ok());
-
-        let bootstrap_topics_from = std::env::var("MITIFLOW_BOOTSTRAP_TOPICS_FROM")
-            .ok()
-            .map(PathBuf::from)
-            .or(self.bootstrap_topics_from);
-
-        let auth_token = auth_token_from_primary_env()?
-            .or(normalize_auth_token(
-                self.auth_token,
-                "auth_token in orchestrator YAML config",
-            )?)
-            .or(auth_token_from_legacy_env()?);
-
-        Ok(mitiflow_orchestrator::orchestrator::OrchestratorConfig {
-            key_prefix: self.key_prefix,
-            data_dir: self.data_dir,
-            lag_interval: Duration::from_millis(self.lag_interval_ms),
-            admin_prefix: self.admin_prefix,
-            http_bind,
-            auth_token,
-            bootstrap_topics_from,
-        })
-    }
 }
 
 fn auth_token_from_env() -> anyhow::Result<Option<String>> {

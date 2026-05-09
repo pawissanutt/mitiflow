@@ -3,6 +3,10 @@
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use mitiflow::{DomainRuntimeConfig, MitiflowDomain, TransportProfile};
+use tracing_subscriber::EnvFilter;
+
+type CtlResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 #[derive(Parser)]
 #[command(name = "mitiflow-ctl", about = "Mitiflow cluster management CLI")]
@@ -14,6 +18,10 @@ struct Cli {
     /// Admin API prefix (default: "{prefix}/_admin")
     #[arg(long)]
     admin_prefix: Option<String>,
+
+    /// Zenoh endpoint(s) to connect to, comma-separated (defaults to a local isolated domain)
+    #[arg(long)]
+    connect: Option<String>,
 
     /// Query timeout in seconds
     #[arg(long, default_value = "5")]
@@ -71,7 +79,21 @@ enum ClusterActions {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
+    if let Err(err) = run().await {
+        eprintln!("Error: {err}");
+        if is_config_error(err.as_ref()) {
+            std::process::exit(2);
+        }
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> CtlResult<()> {
     let cli = Cli::parse();
 
     let admin_prefix = cli
@@ -79,7 +101,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .unwrap_or_else(|| format!("{}/_admin", cli.prefix));
     let timeout = Duration::from_secs(cli.timeout);
 
-    let session = zenoh::open(zenoh::Config::default()).await?;
+    let domain = open_ctl_domain(cli.connect).await?;
+    let session = domain.session();
 
     let route = match &cli.command {
         Commands::Topics { action } => match action {
@@ -123,6 +146,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         std::process::exit(1);
     }
 
-    session.close().await?;
+    domain.shutdown().await?;
     Ok(())
+}
+
+fn is_config_error(err: &(dyn std::error::Error + Send + Sync + 'static)) -> bool {
+    let mut current = Some(err as &dyn std::error::Error);
+    while let Some(cause) = current {
+        if cause
+            .downcast_ref::<mitiflow::Error>()
+            .is_some_and(|err| matches!(err, mitiflow::Error::Domain(_)))
+        {
+            return true;
+        }
+        current = cause.source();
+    }
+    false
+}
+
+async fn open_ctl_domain(connect: Option<String>) -> CtlResult<MitiflowDomain> {
+    let runtime = DomainRuntimeConfig::from_sources_with_transport(
+        "orchestrator-ctl",
+        None,
+        None,
+        transport_from_connect(connect)?,
+    )?;
+    let domain = runtime.open().await?;
+    let transport_profile = format!("{:?}", domain.transport());
+    tracing::info!(
+        domain.id = %domain.id(),
+        namespace.root = %domain.namespace().root(),
+        transport.profile = %transport_profile,
+        "mitiflow domain started domain.id={} namespace.root={} transport.profile={}",
+        domain.id(),
+        domain.namespace().root(),
+        transport_profile
+    );
+    Ok(domain)
+}
+
+fn transport_from_connect(connect: Option<String>) -> CtlResult<Option<TransportProfile>> {
+    match connect {
+        Some(connect) => {
+            let endpoints: Vec<String> = connect
+                .split(',')
+                .map(str::trim)
+                .filter(|endpoint| !endpoint.is_empty())
+                .map(ToOwned::to_owned)
+                .collect();
+            if endpoints.is_empty() {
+                return Err("--connect must include at least one endpoint".into());
+            }
+            Ok(Some(TransportProfile::Client { connect: endpoints }))
+        }
+        None => Ok(None),
+    }
 }

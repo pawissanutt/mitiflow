@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use mitiflow::{Event, EventBusConfig, EventPublisher, EventStore, FjallBackend, HeartbeatMode};
+use mitiflow::{Event, EventPublisher, EventStore, FjallBackend, HeartbeatMode, MitiflowDomain};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OrderEvent {
@@ -21,11 +21,15 @@ async fn main() -> mitiflow::Result<()> {
         .with_env_filter("mitiflow=debug,durable_publish=info")
         .init();
 
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::builder("examples-durable-publish")
+        .open()
+        .await?;
 
-    let config = EventBusConfig::builder("demo/orders")
+    let config = domain
+        .event_bus_config("orders")?
         .cache_size(1000)
         .heartbeat(HeartbeatMode::Periodic(Duration::from_millis(500)))
+        .num_partitions(1)
         .watermark_interval(Duration::from_millis(50))
         .durable_timeout(Duration::from_secs(5))
         .build()?;
@@ -33,12 +37,12 @@ async fn main() -> mitiflow::Result<()> {
     // Start the event store sidecar (in-process for this demo).
     let store_dir = tempfile::tempdir().expect("failed to create temp dir");
     let backend = FjallBackend::open(store_dir.path(), 0)?;
-    let mut store = EventStore::new(&session, backend, config.clone());
+    let mut store = EventStore::new(domain.session(), backend, config.clone());
     store.run().await?;
     println!("EventStore running at {:?}", store_dir.path());
 
     // Create a publisher.
-    let publisher = EventPublisher::new(&session, config).await?;
+    let publisher = EventPublisher::new(domain.session(), config).await?;
 
     // Allow store to initialize.
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -65,9 +69,10 @@ async fn main() -> mitiflow::Result<()> {
         .await?;
     println!("Store contains {} events", stored.len());
 
-    store.shutdown();
     drop(publisher);
-    session.close().await.unwrap();
+    store.shutdown();
+    drop(store);
+    domain.shutdown().await?;
 
     Ok(())
 }

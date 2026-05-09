@@ -63,20 +63,20 @@ For a quick start, `features = ["full"]` is recommended.
 The simplest Mitiflow program: one publisher, one subscriber, no router required.
 
 ```rust
-use mitiflow::{Event, EventBusConfig, EventPublisher, EventSubscriber};
+use mitiflow::{Event, EventBusConfig, EventPublisher, EventSubscriber, MitiflowDomain};
 
 #[tokio::main]
 async fn main() -> mitiflow::Result<()> {
-    // Peer-mode Zenoh session — no broker needed.
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    // Open a local-isolated domain — no broker needed.
+    let domain = MitiflowDomain::builder("demo").open().await?;
 
-    let config = EventBusConfig::builder("demo/sensors")
+    let config = domain.event_bus_config("sensors")?
         .cache_size(100)
         .build()?;
 
     // Create subscriber first so it's ready when events arrive.
-    let subscriber = EventSubscriber::new(&session, config.clone()).await?;
-    let publisher = EventPublisher::new(&session, config).await?;
+    let subscriber = EventSubscriber::new(domain.session(), config.clone()).await?;
+    let publisher = EventPublisher::new(domain.session(), config).await?;
 
     // Publish
     let event = Event::new(serde_json::json!({"temp": 22.5}));
@@ -88,17 +88,18 @@ async fn main() -> mitiflow::Result<()> {
 
     drop(publisher);
     drop(subscriber);
-    session.close().await.unwrap();
+    domain.shutdown().await?;
     Ok(())
 }
 ```
 
 **Key concepts:**
 
-- **`EventBusConfig`** — builder pattern, `"demo/sensors"` is the Zenoh key expression prefix. All publishers and subscribers on the same prefix share an event stream.
+- **`MitiflowDomain`** — scopes the Zenoh session, namespace, and transport. The default `LocalIsolated` profile needs no router. See [Domains & Transport](21_domains.md).
+- **`EventBusConfig`** — builder pattern. `domain.event_bus_config("sensors")` derives the Zenoh key prefix from the domain namespace. All publishers and subscribers on the same prefix share an event stream.
 - **`Event<T>`** — generic envelope: your serializable payload `T`, plus an auto-generated `EventId` (UUID v7) and optional sequence number.
 - **`cache_size`** — how many recent events the publisher keeps in-memory for gap recovery. See [Cache Recovery Design](09_cache_recovery_design.md).
-- **Ordering:** always `drop(publisher)` and `drop(subscriber)` before `session.close()`. Background tasks need a clean shutdown path.
+- **Ordering:** always `drop(publisher)` and `drop(subscriber)` before `domain.shutdown()`. Background tasks need a clean shutdown path.
 
 > **See also:** [Sequencing & Replay](04_sequencing_and_replay.md) for how sequence numbers and gap detection work.
 
@@ -111,21 +112,21 @@ async fn main() -> mitiflow::Result<()> {
 Events with the same key are always routed to the same partition, enabling per-key ordering and key-filtered subscriptions.
 
 ```rust
-let config = EventBusConfig::builder("demo/orders")
+let config = domain.event_bus_config("orders")?
     .num_partitions(8)
     .build()?;
 
-let publisher = EventPublisher::new(&session, config.clone()).await?;
+let publisher = EventPublisher::new(domain.session(), config.clone()).await?;
 
 // Publish with a key — automatically hashed to a partition.
 publisher.publish_keyed("order-123", &event).await?;
 publisher.publish_keyed("order-456", &event).await?;
 
 // Subscribe to only "order-123" events.
-let filtered = EventSubscriber::new_keyed(&session, config.clone(), "order-123").await?;
+let filtered = EventSubscriber::new_keyed(domain.session(), config.clone(), "order-123").await?;
 
 // Subscribe to a key prefix (e.g., all user/42/* events).
-let prefix_sub = EventSubscriber::new_key_prefix(&session, config, "user/42").await?;
+let prefix_sub = EventSubscriber::new_key_prefix(domain.session(), config, "user/42").await?;
 ```
 
 **How it works:** The publisher hashes the key to pick a partition, then publishes to `{prefix}/p/{partition}/k/{key}/{seq}`. Key-filtered subscribers use Zenoh's native key expression matching — no server-side filtering needed.
@@ -143,7 +144,9 @@ let prefix_sub = EventSubscriber::new_key_prefix(&session, config, "user/42").aw
 ```rust
 use mitiflow::{EventStore, FjallBackend};
 
-let config = EventBusConfig::builder("demo/durable")
+let config = domain.event_bus_config("durable")?
+    // Single-store demo only. Multi-partition deployments need stores for each partition.
+    .num_partitions(1)
     .durable_timeout(Duration::from_secs(5))
     .watermark_interval(Duration::from_millis(50))
     .build()?;
@@ -151,10 +154,10 @@ let config = EventBusConfig::builder("demo/durable")
 // Start an in-process event store.
 let store_dir = tempfile::tempdir()?;
 let backend = FjallBackend::open(store_dir.path(), 0)?;
-let mut store = EventStore::new(&session, backend, config.clone());
+let mut store = EventStore::new(domain.session(), backend, config.clone());
 store.run().await?;
 
-let publisher = EventPublisher::new(&session, config).await?;
+let publisher = EventPublisher::new(domain.session(), config).await?;
 
 // Blocks until the store confirms persistence.
 publisher.publish_durable(&event).await?;
@@ -182,7 +185,7 @@ use mitiflow::{
     CommitMode, OffsetReset,
 };
 
-let config = EventBusConfig::builder("demo/consumer_group")
+let config = domain.event_bus_config("consumer_group")?
     .num_partitions(4)
     .build()?;
 
@@ -194,7 +197,7 @@ let group_config = ConsumerGroupConfig {
     offset_reset: OffsetReset::Earliest,
 };
 
-let consumer = ConsumerGroupSubscriber::new(&session, config, group_config).await?;
+let consumer = ConsumerGroupSubscriber::new(domain.session(), config, group_config).await?;
 
 let event: Event<MyPayload> = consumer.recv().await?;
 // Process event...
@@ -326,15 +329,15 @@ let config = EventBusConfig::builder("myapp/events/orders")
     .build()?;
 
 // Fails with TopicSchemaMismatch if local config doesn't match the registry.
-let subscriber = EventSubscriber::new(&session, config).await?;
+let subscriber = EventSubscriber::new(domain.session(), config).await?;
 ```
 
 ### Auto-configure from the registry
 
 ```rust
 // Load everything from the schema registry — no manual config needed.
-let config = EventBusConfig::from_topic(&session, "myapp/events", "orders").await?;
-let publisher = EventPublisher::new(&session, config).await?;
+let config = EventBusConfig::from_topic(domain.session(), "myapp/events", "orders").await?;
+let publisher = EventPublisher::new(domain.session(), config).await?;
 ```
 
 ### Dev mode: register or validate
@@ -347,7 +350,7 @@ let config = EventBusConfig::builder("myapp/events/orders")
     .build()?;
 
 // First publisher registers the schema; subsequent participants validate against it.
-let publisher = EventPublisher::new(&session, config).await?;
+let publisher = EventPublisher::new(domain.session(), config).await?;
 ```
 
 **Schema modes:**
@@ -416,6 +419,7 @@ mitiflow ctl diagnose --timeout 10
 | Understand the architecture | [Architecture](02_architecture.md) |
 | Deploy with containers | [Deployment Guide](deployment.md) |
 | Tune performance | [Configuration Reference](configuration.md) |
+| Domains, namespaces, and transport profiles | [Domains & Transport](21_domains.md) |
 | Browse design decisions | [Documentation Index](index.md) |
 | Run benchmarks | [`mitiflow-bench/`](../mitiflow-bench/) |
 | Explore the full API | `cargo doc --no-deps --features full --open` |

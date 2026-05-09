@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use mitiflow::EventBusConfig;
+use mitiflow::{EventBusConfig, MitiflowDomain};
 use mitiflow_storage::{StorageAgent, StorageAgentConfig, StorageAgentConfigBuilder};
 
 fn agent_config(
@@ -33,10 +33,12 @@ fn agent_config(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_starts_and_owns_all_partitions_single_node() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("agent_single")
+        .await
+        .unwrap();
     let (_tmp, config) = agent_config("agent_single", "node-only", 4, 1);
 
-    let mut agent = StorageAgent::start(&session, config).await.unwrap();
+    let mut agent = StorageAgent::start(domain.session(), config).await.unwrap();
 
     // Single node should own all 4 partitions.
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -53,20 +55,26 @@ async fn agent_starts_and_owns_all_partitions_single_node() {
     }
 
     agent.shutdown().await.unwrap();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_two_nodes_split_partitions() {
-    let session1 = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let session2 = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain1 = MitiflowDomain::isolated_for_test("agent_split")
+        .await
+        .unwrap();
+    let domain2 = domain1.join_isolated().await.unwrap();
 
     let (_tmp1, config1) = agent_config("agent_split", "node-a", 8, 1);
     let (_tmp2, config2) = agent_config("agent_split", "node-b", 8, 1);
 
-    let mut agent1 = StorageAgent::start(&session1, config1).await.unwrap();
+    let mut agent1 = StorageAgent::start(domain1.session(), config1)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let mut agent2 = StorageAgent::start(&session2, config2).await.unwrap();
+    let mut agent2 = StorageAgent::start(domain2.session(), config2)
+        .await
+        .unwrap();
 
     // Wait for rebalance to propagate.
     tokio::time::sleep(Duration::from_millis(1000)).await;
@@ -106,25 +114,33 @@ async fn agent_two_nodes_split_partitions() {
 
     agent1.shutdown().await.unwrap();
     agent2.shutdown().await.unwrap();
-    session1.close().await.unwrap();
-    session2.close().await.unwrap();
+    domain2.shutdown().await.unwrap();
+    domain1.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_node_leave_triggers_rebalance() {
-    let session1 = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let session2 = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let session3 = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain1 = MitiflowDomain::isolated_for_test("agent_leave")
+        .await
+        .unwrap();
+    let domain2 = domain1.join_isolated().await.unwrap();
+    let domain3 = domain1.join_isolated().await.unwrap();
 
     let (_tmp1, config1) = agent_config("agent_leave", "node-a", 6, 1);
     let (_tmp2, config2) = agent_config("agent_leave", "node-b", 6, 1);
     let (_tmp3, config3) = agent_config("agent_leave", "node-c", 6, 1);
 
-    let mut agent1 = StorageAgent::start(&session1, config1).await.unwrap();
+    let mut agent1 = StorageAgent::start(domain1.session(), config1)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let mut agent2 = StorageAgent::start(&session2, config2).await.unwrap();
+    let mut agent2 = StorageAgent::start(domain2.session(), config2)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let mut agent3 = StorageAgent::start(&session3, config3).await.unwrap();
+    let mut agent3 = StorageAgent::start(domain3.session(), config3)
+        .await
+        .unwrap();
 
     tokio::time::sleep(Duration::from_millis(1000)).await;
 
@@ -135,7 +151,7 @@ async fn agent_node_leave_triggers_rebalance() {
 
     // Shutdown agent3 (simulates graceful leave).
     agent3.shutdown().await.unwrap();
-    session3.close().await.unwrap();
+    domain3.shutdown().await.unwrap();
 
     // Wait for rebalance.
     tokio::time::sleep(Duration::from_millis(1500)).await;
@@ -157,16 +173,18 @@ async fn agent_node_leave_triggers_rebalance() {
 
     agent1.shutdown().await.unwrap();
     agent2.shutdown().await.unwrap();
-    session1.close().await.unwrap();
-    session2.close().await.unwrap();
+    domain2.shutdown().await.unwrap();
+    domain1.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_shutdown_drains_stores() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("agent_drain_shutdown")
+        .await
+        .unwrap();
     let (_tmp, config) = agent_config("agent_drain_shutdown", "node-only", 4, 1);
 
-    let mut agent = StorageAgent::start(&session, config).await.unwrap();
+    let mut agent = StorageAgent::start(domain.session(), config).await.unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     assert_eq!(agent.assigned_partitions().await.len(), 4);
@@ -180,19 +198,25 @@ async fn agent_shutdown_drains_stores() {
         "all stores should be stopped after shutdown"
     );
 
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_respects_overrides() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("agent_override")
+        .await
+        .unwrap();
 
     let (_tmp1, config1) = agent_config("agent_override", "node-a", 4, 1);
     let (_tmp2, config2) = agent_config("agent_override", "node-b", 4, 1);
 
-    let mut agent1 = StorageAgent::start(&session, config1).await.unwrap();
+    let mut agent1 = StorageAgent::start(domain.session(), config1)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let mut agent2 = StorageAgent::start(&session, config2).await.unwrap();
+    let mut agent2 = StorageAgent::start(domain.session(), config2)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(1000)).await;
 
     // Publish an override table pinning partition 0 to node-b.
@@ -208,7 +232,7 @@ async fn agent_respects_overrides() {
     };
     let override_key = "test/agent_override/_cluster/overrides";
     let bytes = serde_json::to_vec(&override_table).unwrap();
-    session.put(override_key, bytes).await.unwrap();
+    domain.session().put(override_key, bytes).await.unwrap();
 
     // Wait for override to be processed and trigger rebalance.
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -228,7 +252,7 @@ async fn agent_respects_overrides() {
 
     agent1.shutdown().await.unwrap();
     agent2.shutdown().await.unwrap();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 // --- Phase H: Multi-Replica & Rack-Awareness ---
@@ -260,19 +284,21 @@ fn agent_config_with_labels(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_multi_replica_rf2() {
     // 3 nodes, RF=2, 4 partitions → each partition stored on 2 nodes.
-    let s1 = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let s2 = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let s3 = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let d1 = MitiflowDomain::isolated_for_test("agent_rf2")
+        .await
+        .unwrap();
+    let d2 = d1.join_isolated().await.unwrap();
+    let d3 = d1.join_isolated().await.unwrap();
 
     let (_t1, c1) = agent_config("agent_rf2", "node-a", 4, 2);
     let (_t2, c2) = agent_config("agent_rf2", "node-b", 4, 2);
     let (_t3, c3) = agent_config("agent_rf2", "node-c", 4, 2);
 
-    let mut a1 = StorageAgent::start(&s1, c1).await.unwrap();
+    let mut a1 = StorageAgent::start(d1.session(), c1).await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let mut a2 = StorageAgent::start(&s2, c2).await.unwrap();
+    let mut a2 = StorageAgent::start(d2.session(), c2).await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let mut a3 = StorageAgent::start(&s3, c3).await.unwrap();
+    let mut a3 = StorageAgent::start(d3.session(), c3).await.unwrap();
 
     // Wait for rebalance.
     tokio::time::sleep(Duration::from_millis(1500)).await;
@@ -319,18 +345,20 @@ async fn agent_multi_replica_rf2() {
     a1.shutdown().await.unwrap();
     a2.shutdown().await.unwrap();
     a3.shutdown().await.unwrap();
-    s1.close().await.unwrap();
-    s2.close().await.unwrap();
-    s3.close().await.unwrap();
+    d3.shutdown().await.unwrap();
+    d2.shutdown().await.unwrap();
+    d1.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_rack_aware_placement() {
     // 4 nodes across 2 racks, RF=2 → replicas preferably on separate racks.
-    let s1 = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let s2 = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let s3 = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let s4 = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let d1 = MitiflowDomain::isolated_for_test("agent_rack")
+        .await
+        .unwrap();
+    let d2 = d1.join_isolated().await.unwrap();
+    let d3 = d1.join_isolated().await.unwrap();
+    let d4 = d1.join_isolated().await.unwrap();
 
     let mut rack_a = HashMap::new();
     rack_a.insert("rack".to_string(), "rack-A".to_string());
@@ -342,13 +370,13 @@ async fn agent_rack_aware_placement() {
     let (_t3, c3) = agent_config_with_labels("agent_rack", "node-3", 4, 2, rack_b.clone());
     let (_t4, c4) = agent_config_with_labels("agent_rack", "node-4", 4, 2, rack_b);
 
-    let mut a1 = StorageAgent::start(&s1, c1).await.unwrap();
+    let mut a1 = StorageAgent::start(d1.session(), c1).await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let mut a2 = StorageAgent::start(&s2, c2).await.unwrap();
+    let mut a2 = StorageAgent::start(d2.session(), c2).await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let mut a3 = StorageAgent::start(&s3, c3).await.unwrap();
+    let mut a3 = StorageAgent::start(d3.session(), c3).await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let mut a4 = StorageAgent::start(&s4, c4).await.unwrap();
+    let mut a4 = StorageAgent::start(d4.session(), c4).await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(1500)).await;
     a1.recompute_and_reconcile().await.unwrap();
@@ -407,8 +435,8 @@ async fn agent_rack_aware_placement() {
     a2.shutdown().await.unwrap();
     a3.shutdown().await.unwrap();
     a4.shutdown().await.unwrap();
-    s1.close().await.unwrap();
-    s2.close().await.unwrap();
-    s3.close().await.unwrap();
-    s4.close().await.unwrap();
+    d4.shutdown().await.unwrap();
+    d3.shutdown().await.unwrap();
+    d2.shutdown().await.unwrap();
+    d1.shutdown().await.unwrap();
 }

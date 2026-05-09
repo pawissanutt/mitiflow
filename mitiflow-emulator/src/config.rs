@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use mitiflow::TransportProfile;
 use serde::{Deserialize, Serialize};
 
 use crate::serde_helpers;
@@ -103,6 +104,81 @@ impl Default for ZenohConfig {
             timestamping_enabled: false,
         }
     }
+}
+
+impl ZenohConfig {
+    /// Convert the YAML Zenoh schema into a Zenoh runtime config.
+    ///
+    /// TransportProfile owns the common transport profile mapping; this method
+    /// only reapplies emulator schema fields that are not expressible as a
+    /// TransportProfile (router mode, listen endpoints, and explicit
+    /// timestamping opt-in/out).
+    pub fn to_zenoh_config(&self) -> crate::error::Result<zenoh::Config> {
+        let mut config = self
+            .transport_profile()
+            .to_zenoh_config()
+            .map_err(|e| crate::error::EmulatorError::Config(e.to_string()))?;
+
+        insert_json5(
+            &mut config,
+            "mode",
+            &serde_json::to_string(zenoh_mode_name(self.mode))?,
+        )?;
+
+        if !self.listen.is_empty() {
+            insert_json5(
+                &mut config,
+                "listen/endpoints",
+                &serde_json::to_string(&self.listen)?,
+            )?;
+        }
+
+        if !self.connect.is_empty() && self.mode == ZenohMode::Router {
+            insert_json5(
+                &mut config,
+                "connect/endpoints",
+                &serde_json::to_string(&self.connect)?,
+            )?;
+        }
+
+        insert_json5(
+            &mut config,
+            "timestamping/enabled",
+            if self.timestamping_enabled {
+                "true"
+            } else {
+                "false"
+            },
+        )?;
+
+        Ok(config)
+    }
+
+    fn transport_profile(&self) -> TransportProfile {
+        match self.mode {
+            ZenohMode::Client if !self.connect.is_empty() => TransportProfile::Client {
+                connect: self.connect.clone(),
+            },
+            ZenohMode::Peer if !self.connect.is_empty() => TransportProfile::PeerMesh {
+                connect: self.connect.clone(),
+            },
+            _ => TransportProfile::Ambient,
+        }
+    }
+}
+
+fn zenoh_mode_name(mode: ZenohMode) -> &'static str {
+    match mode {
+        ZenohMode::Peer => "peer",
+        ZenohMode::Client => "client",
+        ZenohMode::Router => "router",
+    }
+}
+
+fn insert_json5(config: &mut zenoh::Config, key: &str, value: &str) -> crate::error::Result<()> {
+    config
+        .insert_json5(key, value)
+        .map_err(|e| crate::error::EmulatorError::Config(e.to_string()))
 }
 
 /// Zenoh session mode.

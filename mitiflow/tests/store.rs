@@ -11,7 +11,7 @@ use mitiflow::store::FjallBackend;
 use mitiflow::store::backend::{EventMetadata, HlcTimestamp, StorageBackend};
 use mitiflow::store::query::{QueryFilters, ReplayFilters};
 use mitiflow::types::{EventId, PublisherId};
-use mitiflow::{Event, EventBusConfig, EventPublisher, EventStore, HeartbeatMode};
+use mitiflow::{Event, EventPublisher, EventStore, HeartbeatMode};
 
 use common::TestPayload;
 
@@ -280,10 +280,12 @@ fn fjall_seq_filter_range() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn event_store_persists_and_publishes_watermark() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = common::isolated_domain("e2e_store").await;
     let dir = temp_dir("e2e_store");
 
-    let config = EventBusConfig::builder("test/e2e_store")
+    let config = domain
+        .event_bus_config("events")
+        .unwrap()
         .cache_size(100)
         .heartbeat(HeartbeatMode::Disabled)
         .history_on_subscribe(false)
@@ -293,11 +295,13 @@ async fn event_store_persists_and_publishes_watermark() {
         .unwrap();
 
     let backend = FjallBackend::open(dir.path(), 0).unwrap();
-    let mut store = EventStore::new(&session, backend, config.clone());
+    let mut store = EventStore::new(domain.session(), backend, config.clone());
     store.run().await.unwrap();
 
     // Create publisher and send events.
-    let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
 
     // Allow store to initialize its subscriber.
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -335,7 +339,7 @@ async fn event_store_persists_and_publishes_watermark() {
 
     // Subscribe to watermark and verify we get one.
     let wm_key = config.resolved_watermark_key();
-    let wm_sub = session.declare_subscriber(&wm_key).await.unwrap();
+    let wm_sub = domain.session().declare_subscriber(&wm_key).await.unwrap();
 
     let wm_sample = tokio::time::timeout(Duration::from_secs(2), wm_sub.recv_async())
         .await
@@ -352,9 +356,10 @@ async fn event_store_persists_and_publishes_watermark() {
         .unwrap_or(0);
     assert!(max_committed >= 1, "watermark should cover events");
 
+    drop(wm_sub);
     store.shutdown();
     drop(publisher);
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 // ---------------------------------------------------------------------------

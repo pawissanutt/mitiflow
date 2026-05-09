@@ -1,10 +1,15 @@
 //! TestCluster — manages N StorageAgent instances for E2E tests.
+//!
+//! All sessions use a parent [`MitiflowDomain`] in `LocalIsolated` mode plus
+//! per-agent child domains via [`MitiflowDomain::join_isolated`]. This keeps
+//! the cluster isolated from other concurrent tests while still letting the
+//! agents and any joined publish/query session communicate over Zenoh.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
 use mitiflow::attachment::decode_metadata;
-use mitiflow::{EventBusConfig, EventPublisher};
+use mitiflow::{EventBusConfig, EventPublisher, MitiflowDomain};
 use mitiflow_storage::{StorageAgent, StorageAgentConfigBuilder};
 
 /// A managed cluster of StorageAgent instances for testing.
@@ -12,23 +17,32 @@ pub struct TestCluster {
     pub test_name: String,
     pub num_partitions: u32,
     pub replication_factor: u32,
+    parent_domain: Option<MitiflowDomain>,
     agents: Vec<Option<AgentSlot>>,
     node_labels: Vec<HashMap<String, String>>,
 }
 
 struct AgentSlot {
     agent: StorageAgent,
-    session: zenoh::Session,
+    domain: MitiflowDomain,
     _tmp: tempfile::TempDir,
 }
 
 impl TestCluster {
     /// Create a new cluster description without starting any agents.
-    pub fn new(test_name: &str, num_nodes: usize, num_partitions: u32, rf: u32) -> Self {
+    ///
+    /// Opens a parent `MitiflowDomain` in `LocalIsolated` mode so that
+    /// subsequent agent sessions joined via [`MitiflowDomain::join_isolated`]
+    /// can discover each other while remaining isolated from other tests.
+    pub async fn new(test_name: &str, num_nodes: usize, num_partitions: u32, rf: u32) -> Self {
+        let parent_domain = MitiflowDomain::isolated_for_test(test_name)
+            .await
+            .expect("isolated parent domain for TestCluster");
         Self {
             test_name: test_name.to_string(),
             num_partitions,
             replication_factor: rf,
+            parent_domain: Some(parent_domain),
             agents: (0..num_nodes).map(|_| None).collect(),
             node_labels: vec![HashMap::new(); num_nodes],
         }
@@ -40,9 +54,19 @@ impl TestCluster {
         self.node_labels[idx] = labels;
     }
 
+    fn parent(&self) -> &MitiflowDomain {
+        self.parent_domain
+            .as_ref()
+            .expect("parent domain available before shutdown")
+    }
+
     /// Start agent at the given slot index.
     pub async fn start_agent(&mut self, idx: usize) {
-        let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+        let domain = self
+            .parent()
+            .join_isolated()
+            .await
+            .expect("join_isolated for agent session");
         let tmp = tempfile::tempdir().unwrap();
         let bus_config = EventBusConfig::builder(format!("test/{}", self.test_name))
             .cache_size(100)
@@ -58,10 +82,10 @@ impl TestCluster {
             .build()
             .unwrap();
 
-        let agent = StorageAgent::start(&session, config).await.unwrap();
+        let agent = StorageAgent::start(domain.session(), config).await.unwrap();
         self.agents[idx] = Some(AgentSlot {
             agent,
-            session,
+            domain,
             _tmp: tmp,
         });
 
@@ -73,7 +97,7 @@ impl TestCluster {
     pub async fn stop_agent(&mut self, idx: usize) {
         if let Some(mut slot) = self.agents[idx].take() {
             slot.agent.shutdown().await.unwrap();
-            slot.session.close().await.unwrap();
+            slot.domain.shutdown().await.unwrap();
         }
     }
 
@@ -81,9 +105,10 @@ impl TestCluster {
     /// This still sends a transport close which allows liveliness detection.
     pub async fn kill_agent(&mut self, idx: usize) {
         if let Some(slot) = self.agents[idx].take() {
-            // Close session (sends transport close → liveliness delete propagates),
-            // but skip graceful agent shutdown (no drain, no de-registration).
-            let _ = slot.session.close().await;
+            // Close the child domain (sends transport close → liveliness delete
+            // propagates), but skip graceful agent shutdown (no drain, no
+            // de-registration).
+            let _ = slot.domain.shutdown().await;
         }
     }
 
@@ -196,10 +221,17 @@ impl TestCluster {
         snapshot.values().map(|v| v.len()).sum()
     }
 
-    /// Shutdown all remaining agents.
+    /// Shutdown all remaining agents and the parent domain.
+    ///
+    /// Drop ordering: agents (children) first, then parent. Callers that
+    /// joined extra publish/query sessions must shut those children down
+    /// before invoking `shutdown_all`.
     pub async fn shutdown_all(&mut self) {
         for i in 0..self.agents.len() {
             self.stop_agent(i).await;
+        }
+        if let Some(parent) = self.parent_domain.take() {
+            parent.shutdown().await.unwrap();
         }
     }
 
@@ -212,7 +244,20 @@ impl TestCluster {
     /// Get a Zenoh session from a running agent (for publishing/querying).
     #[allow(dead_code)]
     pub fn session(&self, idx: usize) -> Option<&zenoh::Session> {
-        self.agents[idx].as_ref().map(|s| &s.session)
+        self.agents[idx].as_ref().map(|s| s.domain.session())
+    }
+
+    /// Join an additional [`MitiflowDomain`] to this cluster's isolated network.
+    ///
+    /// Use this when a test needs an extra session for publishing or querying.
+    /// The returned domain is a Client of the parent's listen endpoint and
+    /// MUST be shut down before [`Self::shutdown_all`].
+    #[allow(dead_code)]
+    pub async fn join_session(&self) -> MitiflowDomain {
+        self.parent()
+            .join_isolated()
+            .await
+            .expect("join_isolated for test publish/query session")
     }
 
     /// Create an `EventPublisher` bound to this cluster's key prefix.

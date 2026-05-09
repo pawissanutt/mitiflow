@@ -24,7 +24,7 @@ fn temp_dir(name: &str) -> tempfile::TempDir {
 }
 
 /// Build a config with offload enabled and aggressive (test-friendly) thresholds.
-fn offload_config(test_name: &str, channel_capacity: usize) -> EventBusConfig {
+fn offload_config(domain: &mitiflow::MitiflowDomain, channel_capacity: usize) -> EventBusConfig {
     let offload = OffloadConfig {
         enabled: true,
         channel_fullness_threshold: 0.5,
@@ -37,7 +37,9 @@ fn offload_config(test_name: &str, channel_capacity: usize) -> EventBusConfig {
         re_subscribe_threshold: 10,
         drain_quiet_period: Duration::from_millis(10),
     };
-    EventBusConfig::builder(format!("test/{test_name}"))
+    domain
+        .event_bus_config("events")
+        .expect("valid topic")
         .cache_size(256)
         .heartbeat(HeartbeatMode::Disabled)
         .history_on_subscribe(false)
@@ -55,13 +57,15 @@ fn offload_config(test_name: &str, channel_capacity: usize) -> EventBusConfig {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn offload_disabled_no_transition() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = common::isolated_domain("offload_disabled").await;
 
     let offload = OffloadConfig {
         enabled: false,
         ..OffloadConfig::default()
     };
-    let config = EventBusConfig::builder("test/offload_disabled")
+    let config = domain
+        .event_bus_config("events")
+        .unwrap()
         .cache_size(100)
         .heartbeat(HeartbeatMode::Disabled)
         .history_on_subscribe(false)
@@ -69,7 +73,7 @@ async fn offload_disabled_no_transition() {
         .build()
         .unwrap();
 
-    let subscriber = EventSubscriber::new(&session, config.clone())
+    let subscriber = EventSubscriber::new(domain.session(), config.clone())
         .await
         .unwrap();
 
@@ -79,7 +83,7 @@ async fn offload_disabled_no_transition() {
         "offload_events() should be None when disabled"
     );
 
-    let publisher = EventPublisher::new(&session, config).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Publish and receive a few events normally.
@@ -98,7 +102,7 @@ async fn offload_disabled_no_transition() {
 
     drop(publisher);
     subscriber.shutdown().await;
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -107,10 +111,10 @@ async fn offload_disabled_no_transition() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fast_consumer_never_offloads() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let config = offload_config("fast_consumer", 1024);
+    let domain = common::isolated_domain("fast_consumer").await;
+    let config = offload_config(&domain, 1024);
 
-    let subscriber = EventSubscriber::new(&session, config.clone())
+    let subscriber = EventSubscriber::new(domain.session(), config.clone())
         .await
         .unwrap();
     let offload_rx = subscriber
@@ -118,7 +122,7 @@ async fn fast_consumer_never_offloads() {
         .expect("offload channel should be Some when enabled")
         .clone();
 
-    let publisher = EventPublisher::new(&session, config).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Publish and immediately consume — channel never fills up.
@@ -141,7 +145,7 @@ async fn fast_consumer_never_offloads() {
 
     drop(publisher);
     subscriber.shutdown().await;
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -150,17 +154,19 @@ async fn fast_consumer_never_offloads() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn offload_events_channel_available() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let config = offload_config("offload_channel", 64);
+    let domain = common::isolated_domain("offload_channel").await;
+    let config = offload_config(&domain, 64);
 
-    let subscriber = EventSubscriber::new(&session, config).await.unwrap();
+    let subscriber = EventSubscriber::new(domain.session(), config)
+        .await
+        .unwrap();
     assert!(
         subscriber.offload_events().is_some(),
         "offload_events() should be Some when offload is enabled"
     );
 
     subscriber.shutdown().await;
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -176,23 +182,23 @@ async fn offload_events_channel_available() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn slow_consumer_triggers_offload_lifecycle() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = common::isolated_domain("offload_lifecycle").await;
     let dir = temp_dir("offload_lifecycle");
 
     // Small channel (32) so offload triggers quickly.
-    let config = offload_config("offload_lifecycle", 32);
+    let config = offload_config(&domain, 32);
 
     // Start the event store.
     let backend = FjallBackend::open(dir.path(), 0).unwrap();
-    let mut store = EventStore::new(&session, backend, config.clone());
+    let mut store = EventStore::new(domain.session(), backend, config.clone());
     store.run().await.unwrap();
 
     // Create subscriber first, then publisher.
-    let subscriber = EventSubscriber::new(&session, config.clone())
+    let subscriber = EventSubscriber::new(domain.session(), config.clone())
         .await
         .unwrap();
     let offload_rx = subscriber.offload_events().unwrap().clone();
-    let publisher = EventPublisher::new(&session, config).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Publish enough events to fill the channel and trigger offload.
@@ -246,7 +252,7 @@ async fn slow_consumer_triggers_offload_lifecycle() {
     drop(publisher);
     subscriber.shutdown().await;
     store.shutdown();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -258,20 +264,20 @@ async fn slow_consumer_triggers_offload_lifecycle() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn offload_preserves_ordering() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = common::isolated_domain("offload_ordering").await;
     let dir = temp_dir("offload_ordering");
 
-    let config = offload_config("offload_ordering", 32);
+    let config = offload_config(&domain, 32);
 
     // Start store.
     let backend = FjallBackend::open(dir.path(), 0).unwrap();
-    let mut store = EventStore::new(&session, backend, config.clone());
+    let mut store = EventStore::new(domain.session(), backend, config.clone());
     store.run().await.unwrap();
 
-    let subscriber = EventSubscriber::new(&session, config.clone())
+    let subscriber = EventSubscriber::new(domain.session(), config.clone())
         .await
         .unwrap();
-    let publisher = EventPublisher::new(&session, config).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Publish events.
@@ -314,7 +320,7 @@ async fn offload_preserves_ordering() {
     drop(publisher);
     subscriber.shutdown().await;
     store.shutdown();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -326,7 +332,7 @@ async fn offload_preserves_ordering() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn debounce_prevents_flapping() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = common::isolated_domain("debounce_flapping").await;
 
     // Long debounce (5s) — the burst clears well before.
     let offload = OffloadConfig {
@@ -335,7 +341,9 @@ async fn debounce_prevents_flapping() {
         debounce_window: Duration::from_secs(5),
         ..OffloadConfig::default()
     };
-    let config = EventBusConfig::builder("test/debounce_flapping")
+    let config = domain
+        .event_bus_config("events")
+        .unwrap()
         .cache_size(100)
         .heartbeat(HeartbeatMode::Disabled)
         .history_on_subscribe(false)
@@ -344,11 +352,11 @@ async fn debounce_prevents_flapping() {
         .build()
         .unwrap();
 
-    let subscriber = EventSubscriber::new(&session, config.clone())
+    let subscriber = EventSubscriber::new(domain.session(), config.clone())
         .await
         .unwrap();
     let offload_rx = subscriber.offload_events().unwrap().clone();
-    let publisher = EventPublisher::new(&session, config).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Publish a short burst.
@@ -375,5 +383,5 @@ async fn debounce_prevents_flapping() {
 
     drop(publisher);
     subscriber.shutdown().await;
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }

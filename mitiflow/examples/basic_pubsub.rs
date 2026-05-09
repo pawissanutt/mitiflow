@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use mitiflow::{Event, EventBusConfig, EventPublisher, EventSubscriber, HeartbeatMode};
+use mitiflow::{Event, EventPublisher, EventSubscriber, HeartbeatMode, MitiflowDomain};
 
 /// Application-level payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,20 +26,23 @@ async fn main() -> mitiflow::Result<()> {
         .with_env_filter("mitiflow=debug,basic_pubsub=info")
         .init();
 
-    // Open a peer-mode Zenoh session (no router needed).
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    // Open an isolated local domain (no router needed).
+    let domain = MitiflowDomain::builder("examples-basic-pubsub")
+        .open()
+        .await?;
 
     // Build configuration shared by publisher and subscriber.
-    let config = EventBusConfig::builder("demo/sensors")
+    let config = domain
+        .event_bus_config("sensors")?
         .cache_size(100)
         .heartbeat(HeartbeatMode::Periodic(Duration::from_millis(500)))
         .build()?;
 
     // Create the subscriber first so it's ready when events arrive.
-    let subscriber = EventSubscriber::new(&session, config.clone()).await?;
+    let subscriber = EventSubscriber::new(domain.session(), config.clone()).await?;
 
     // Create the publisher.
-    let publisher = EventPublisher::new(&session, config).await?;
+    let publisher = EventPublisher::new(domain.session(), config).await?;
     println!("Publisher started: {}", publisher.publisher_id());
 
     // Allow subscriber to fully initialize.
@@ -95,7 +98,7 @@ async fn main() -> mitiflow::Result<()> {
     // Drop publisher and subscriber to cancel background tasks.
     drop(publisher);
     drop(subscriber);
-    session.close().await.unwrap();
+    domain.shutdown().await?;
 
     Ok(())
 }

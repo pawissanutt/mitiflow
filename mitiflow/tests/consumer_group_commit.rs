@@ -18,8 +18,10 @@ use mitiflow::{
 };
 
 /// Create an EventBusConfig with fast timeouts for testing.
-fn cg_test_config(test_name: &str) -> EventBusConfig {
-    EventBusConfig::builder(format!("test/{test_name}"))
+fn cg_test_config(domain: &mitiflow::MitiflowDomain) -> EventBusConfig {
+    domain
+        .event_bus_config("events")
+        .expect("valid topic")
         .cache_size(1000)
         .heartbeat(HeartbeatMode::Periodic(Duration::from_millis(200)))
         .history_on_subscribe(false)
@@ -78,23 +80,25 @@ async fn publish_to_partition(publisher: &EventPublisher, count: u64, start_valu
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn commit_and_fetch_round_trip() {
     let test_name = "cg_commit_fetch_rt";
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let config = cg_test_config(test_name);
+    let domain = common::isolated_domain(test_name).await;
+    let config = cg_test_config(&domain);
     let tmp = common::temp_dir(test_name);
 
     // Start store for partition 0
-    let store = start_store(&session, config.clone(), tmp.path(), 0).await;
+    let store = start_store(domain.session(), config.clone(), tmp.path(), 0).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Create consumer BEFORE publishing so it receives live events
     let gc = group_config(test_name);
     let group_id = gc.group_id.clone();
-    let c0 = ConsumerGroupSubscriber::new(&session, config.clone(), gc)
+    let c0 = ConsumerGroupSubscriber::new(domain.session(), config.clone(), gc)
         .await
         .unwrap();
 
     // Now publish 20 events
-    let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     publish_to_partition(&publisher, 20, 0).await;
     for _ in 0..20 {
@@ -113,7 +117,7 @@ async fn commit_and_fetch_round_trip() {
         commit_mode: CommitMode::Manual,
         offset_reset: OffsetReset::Earliest,
     };
-    let c1 = ConsumerGroupSubscriber::new(&session, config.clone(), gc2)
+    let c1 = ConsumerGroupSubscriber::new(domain.session(), config.clone(), gc2)
         .await
         .unwrap();
     let offsets = c1.load_offsets(0).await.unwrap();
@@ -125,7 +129,9 @@ async fn commit_and_fetch_round_trip() {
     }
 
     c1.shutdown().await;
+    drop(publisher);
     store.shutdown();
+    domain.shutdown().await.unwrap();
 }
 
 // ==========================================================================
@@ -135,22 +141,26 @@ async fn commit_and_fetch_round_trip() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn commit_multiple_publishers() {
     let test_name = "cg_multi_pub";
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let config = cg_test_config(test_name);
+    let domain = common::isolated_domain(test_name).await;
+    let config = cg_test_config(&domain);
     let tmp = common::temp_dir(test_name);
 
-    let store = start_store(&session, config.clone(), tmp.path(), 0).await;
+    let store = start_store(domain.session(), config.clone(), tmp.path(), 0).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Create consumer BEFORE publishing
     let gc = group_config(test_name);
-    let c0 = ConsumerGroupSubscriber::new(&session, config.clone(), gc)
+    let c0 = ConsumerGroupSubscriber::new(domain.session(), config.clone(), gc)
         .await
         .unwrap();
 
     // Create 2 publishers, each sends events
-    let p1 = EventPublisher::new(&session, config.clone()).await.unwrap();
-    let p2 = EventPublisher::new(&session, config.clone()).await.unwrap();
+    let p1 = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
+    let p2 = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     publish_to_partition(&p1, 10, 0).await;
     publish_to_partition(&p2, 5, 100).await;
@@ -171,7 +181,10 @@ async fn commit_multiple_publishers() {
     );
 
     c0.shutdown().await;
+    drop(p1);
+    drop(p2);
     store.shutdown();
+    domain.shutdown().await.unwrap();
 }
 
 // ==========================================================================
@@ -181,14 +194,16 @@ async fn commit_multiple_publishers() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn zombie_commit_rejected() {
     let test_name = "cg_zombie_fenced";
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let config = cg_test_config(test_name);
+    let domain = common::isolated_domain(test_name).await;
+    let config = cg_test_config(&domain);
     let tmp = common::temp_dir(test_name);
 
-    let store = start_store(&session, config.clone(), tmp.path(), 0).await;
+    let store = start_store(domain.session(), config.clone(), tmp.path(), 0).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
     let pub_id = *publisher.publisher_id();
     publish_to_partition(&publisher, 10, 0).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -204,9 +219,9 @@ async fn zombie_commit_rejected() {
         generation: 1,
         timestamp: chrono::Utc::now(),
     };
-    let key = format!("test/{test_name}/_offsets/0/{group_id}");
+    let key = format!("{}/_offsets/0/{group_id}", config.key_prefix);
     let payload = serde_json::to_vec(&commit_gen1).unwrap();
-    let replies = session.get(&key).payload(payload).await.unwrap();
+    let replies = domain.session().get(&key).payload(payload).await.unwrap();
     while let Ok(_reply) = replies.recv_async().await {}
 
     // C1 commits with generation=2 (simulating after rebalance)
@@ -219,7 +234,7 @@ async fn zombie_commit_rejected() {
         timestamp: chrono::Utc::now(),
     };
     let payload2 = serde_json::to_vec(&commit_gen2).unwrap();
-    let replies2 = session.get(&key).payload(payload2).await.unwrap();
+    let replies2 = domain.session().get(&key).payload(payload2).await.unwrap();
     while let Ok(_reply) = replies2.recv_async().await {}
 
     // Zombie C0 tries to commit with generation=1 → should be rejected
@@ -232,7 +247,12 @@ async fn zombie_commit_rejected() {
         timestamp: chrono::Utc::now(),
     };
     let zombie_payload = serde_json::to_vec(&zombie_commit).unwrap();
-    let zombie_replies = session.get(&key).payload(zombie_payload).await.unwrap();
+    let zombie_replies = domain
+        .session()
+        .get(&key)
+        .payload(zombie_payload)
+        .await
+        .unwrap();
     let mut was_rejected = false;
     while let Ok(reply) = zombie_replies.recv_async().await {
         if let Ok(sample) = reply.result() {
@@ -246,9 +266,11 @@ async fn zombie_commit_rejected() {
     assert!(was_rejected, "zombie commit should have been rejected");
 
     // Verify stored offset is still C1's value (9), not zombie's (6)
-    let fetch_selector =
-        format!("test/{test_name}/_offsets/0/{group_id}?fetch=true&group_id={group_id}");
-    let fetch_replies = session.get(&fetch_selector).await.unwrap();
+    let fetch_selector = format!(
+        "{}/_offsets/0/{group_id}?fetch=true&group_id={group_id}",
+        config.key_prefix
+    );
+    let fetch_replies = domain.session().get(&fetch_selector).await.unwrap();
     while let Ok(reply) = fetch_replies.recv_async().await {
         if let Ok(sample) = reply.result() {
             let payload = sample.payload().to_bytes();
@@ -259,7 +281,9 @@ async fn zombie_commit_rejected() {
         }
     }
 
+    drop(publisher);
     store.shutdown();
+    domain.shutdown().await.unwrap();
 }
 
 // ==========================================================================
@@ -269,20 +293,22 @@ async fn zombie_commit_rejected() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_commit_interval() {
     let test_name = "cg_auto_commit";
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let config = cg_test_config(test_name);
+    let domain = common::isolated_domain(test_name).await;
+    let config = cg_test_config(&domain);
     let tmp = common::temp_dir(test_name);
 
-    let store = start_store(&session, config.clone(), tmp.path(), 0).await;
+    let store = start_store(domain.session(), config.clone(), tmp.path(), 0).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Consumer with auto-commit every 200ms — created BEFORE publishing
     let gc = auto_commit_group_config(test_name, Duration::from_millis(200));
-    let c0 = ConsumerGroupSubscriber::new(&session, config.clone(), gc)
+    let c0 = ConsumerGroupSubscriber::new(domain.session(), config.clone(), gc)
         .await
         .unwrap();
 
-    let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     publish_to_partition(&publisher, 10, 0).await;
 
@@ -305,7 +331,9 @@ async fn auto_commit_interval() {
     );
 
     c0.shutdown().await;
+    drop(publisher);
     store.shutdown();
+    domain.shutdown().await.unwrap();
 }
 
 // ==========================================================================
@@ -315,21 +343,25 @@ async fn auto_commit_interval() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn offset_per_publisher_independence() {
     let test_name = "cg_pub_indep";
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let config = cg_test_config(test_name);
+    let domain = common::isolated_domain(test_name).await;
+    let config = cg_test_config(&domain);
     let tmp = common::temp_dir(test_name);
 
-    let store = start_store(&session, config.clone(), tmp.path(), 0).await;
+    let store = start_store(domain.session(), config.clone(), tmp.path(), 0).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Create consumer BEFORE publishing
     let gc = group_config(test_name);
-    let c0 = ConsumerGroupSubscriber::new(&session, config.clone(), gc)
+    let c0 = ConsumerGroupSubscriber::new(domain.session(), config.clone(), gc)
         .await
         .unwrap();
 
-    let p1 = EventPublisher::new(&session, config.clone()).await.unwrap();
-    let p2 = EventPublisher::new(&session, config.clone()).await.unwrap();
+    let p1 = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
+    let p2 = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
     let p1_id = *p1.publisher_id();
     let p2_id = *p2.publisher_id();
 
@@ -365,7 +397,10 @@ async fn offset_per_publisher_independence() {
     );
 
     c0.shutdown().await;
+    drop(p1);
+    drop(p2);
     store.shutdown();
+    domain.shutdown().await.unwrap();
 }
 
 // ==========================================================================
@@ -375,11 +410,11 @@ async fn offset_per_publisher_independence() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn independent_groups_same_topic() {
     let test_name = "cg_independent_groups";
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let config = cg_test_config(test_name);
+    let domain = common::isolated_domain(test_name).await;
+    let config = cg_test_config(&domain);
     let tmp = common::temp_dir(test_name);
 
-    let store = start_store(&session, config.clone(), tmp.path(), 0).await;
+    let store = start_store(domain.session(), config.clone(), tmp.path(), 0).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Create both consumers BEFORE publishing
@@ -389,7 +424,7 @@ async fn independent_groups_same_topic() {
         commit_mode: CommitMode::Manual,
         offset_reset: OffsetReset::Earliest,
     };
-    let c_analytics = ConsumerGroupSubscriber::new(&session, config.clone(), gc_analytics)
+    let c_analytics = ConsumerGroupSubscriber::new(domain.session(), config.clone(), gc_analytics)
         .await
         .unwrap();
 
@@ -399,11 +434,13 @@ async fn independent_groups_same_topic() {
         commit_mode: CommitMode::Manual,
         offset_reset: OffsetReset::Earliest,
     };
-    let c_billing = ConsumerGroupSubscriber::new(&session, config.clone(), gc_billing)
+    let c_billing = ConsumerGroupSubscriber::new(domain.session(), config.clone(), gc_billing)
         .await
         .unwrap();
 
-    let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     publish_to_partition(&publisher, 10, 0).await;
 
@@ -438,7 +475,9 @@ async fn independent_groups_same_topic() {
 
     c_analytics.shutdown().await;
     c_billing.shutdown().await;
+    drop(publisher);
     store.shutdown();
+    domain.shutdown().await.unwrap();
 }
 
 // ==========================================================================
@@ -448,20 +487,22 @@ async fn independent_groups_same_topic() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn commit_sync_vs_async() {
     let test_name = "cg_sync_vs_async";
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let config = cg_test_config(test_name);
+    let domain = common::isolated_domain(test_name).await;
+    let config = cg_test_config(&domain);
     let tmp = common::temp_dir(test_name);
 
-    let store = start_store(&session, config.clone(), tmp.path(), 0).await;
+    let store = start_store(domain.session(), config.clone(), tmp.path(), 0).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Create consumer BEFORE publishing
     let gc = group_config(test_name);
-    let c0 = ConsumerGroupSubscriber::new(&session, config.clone(), gc)
+    let c0 = ConsumerGroupSubscriber::new(domain.session(), config.clone(), gc)
         .await
         .unwrap();
 
-    let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     publish_to_partition(&publisher, 10, 0).await;
 
@@ -503,7 +544,9 @@ async fn commit_sync_vs_async() {
     }
 
     c0.shutdown().await;
+    drop(publisher);
     store.shutdown();
+    domain.shutdown().await.unwrap();
 }
 
 // ==========================================================================
@@ -513,22 +556,24 @@ async fn commit_sync_vs_async() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn store_crash_and_offset_recovery() {
     let test_name = "cg_store_recovery";
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let config = cg_test_config(test_name);
+    let domain = common::isolated_domain(test_name).await;
+    let config = cg_test_config(&domain);
     let tmp = common::temp_dir(test_name);
 
     // Phase 1: commit offsets
     {
-        let store = start_store(&session, config.clone(), tmp.path(), 0).await;
+        let store = start_store(domain.session(), config.clone(), tmp.path(), 0).await;
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Create consumer BEFORE publishing
         let gc = group_config(test_name);
-        let c0 = ConsumerGroupSubscriber::new(&session, config.clone(), gc)
+        let c0 = ConsumerGroupSubscriber::new(domain.session(), config.clone(), gc)
             .await
             .unwrap();
 
-        let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
+        let publisher = EventPublisher::new(domain.session(), config.clone())
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
         publish_to_partition(&publisher, 10, 0).await;
         for _ in 0..10 {
@@ -545,11 +590,11 @@ async fn store_crash_and_offset_recovery() {
     // Phase 2: restart store and verify offsets survive
     tokio::time::sleep(Duration::from_millis(200)).await;
     {
-        let store = start_store(&session, config.clone(), tmp.path(), 0).await;
+        let store = start_store(domain.session(), config.clone(), tmp.path(), 0).await;
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         let gc = group_config(test_name);
-        let c1 = ConsumerGroupSubscriber::new(&session, config.clone(), gc)
+        let c1 = ConsumerGroupSubscriber::new(domain.session(), config.clone(), gc)
             .await
             .unwrap();
         let offsets = c1.load_offsets(0).await.unwrap();
@@ -561,4 +606,6 @@ async fn store_crash_and_offset_recovery() {
         c1.shutdown().await;
         store.shutdown();
     }
+
+    domain.shutdown().await.unwrap();
 }

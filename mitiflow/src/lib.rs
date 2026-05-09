@@ -5,6 +5,11 @@ pub mod attachment;
 pub mod codec;
 pub mod config;
 pub mod dlq;
+pub mod domain;
+pub use domain::{
+    DomainId, DomainRuntimeConfig, DomainYamlConfig, MitiflowDomain, MitiflowDomainBuilder,
+    Namespace, TransportProfile, TransportYamlConfig,
+};
 pub mod error;
 pub mod event;
 pub mod publisher;
