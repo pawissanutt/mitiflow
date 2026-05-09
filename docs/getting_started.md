@@ -145,6 +145,8 @@ let prefix_sub = EventSubscriber::new_key_prefix(domain.session(), config, "user
 use mitiflow::{EventStore, FjallBackend};
 
 let config = domain.event_bus_config("durable")?
+    // Single-store demo only. Multi-partition deployments need stores for each partition.
+    .num_partitions(1)
     .durable_timeout(Duration::from_secs(5))
     .watermark_interval(Duration::from_millis(50))
     .build()?;

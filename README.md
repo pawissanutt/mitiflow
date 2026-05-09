@@ -119,7 +119,7 @@ async fn main() -> mitiflow::Result<()> {
 }
 ```
 
-The examples below reuse `domain.session()` the same way. See [Domains](docs/21_domains.md) for transport profiles, namespaces, and multi-process setups.
+The examples below reuse `domain.session()` the same way. See [Domains](docs/21_domains.md) for transport profiles, namespaces, multi-process setups, and migration from raw Zenoh sessions.
 
 ### Keyed publishing with partition affinity
 
@@ -138,6 +138,8 @@ let sub = EventSubscriber::new_key_prefix(domain.session(), config, "user-").awa
 
 ```rust
 let config = domain.event_bus_config("durable")?
+    // Single-store demo only. Multi-partition deployments need stores for each partition.
+    .num_partitions(1)
     .durable_timeout(Duration::from_secs(5))
     .build()?;
 let publisher = EventPublisher::new(domain.session(), config).await?;
@@ -246,7 +248,7 @@ Full documentation is in [`docs/`](docs/index.md):
 | [Getting Started](docs/getting_started.md) | Step-by-step tutorial: installation, pub/sub, keyed events, durable writes, consumer groups |
 | [Deployment Guide](docs/deployment.md) | Dev mode, containers, compose stack, Zenoh topology, monitoring, troubleshooting |
 | [Configuration Reference](docs/configuration.md) | Complete reference for all config options, codec selection, common patterns |
-| [Domains & Transport](docs/21_domains.md) | Domain isolation, namespaces, transport profiles, and YAML/env configuration |
+| [Domains & Transport](docs/21_domains.md) | Domain isolation, namespaces, transport profiles, raw Zenoh migration, and YAML/env configuration |
 
 ### Design Documents
 
