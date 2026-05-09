@@ -70,6 +70,7 @@ Deep dives into how Mitiflow works internally. Read these to understand design t
 | Document | Topic |
 |----------|-------|
 | [Distributed Storage](13_distributed_storage.md) | StorageAgent, rendezvous hashing, two-tier architecture, recovery |
+| [Domains & Transport](21_domains.md) | Domain IDs, namespaces, transport profiles, YAML/env config, observability |
 | [Multi-Topic & DX](16_dx_and_multi_topic.md) | Dynamic topic discovery, provisioning protocol, deployment modes |
 | [Topic Schema Registry](18_topic_schema_registry.md) | Distributed schema validation, auto-configuration, codec/partition agreement |
 | [Graceful Termination](10_graceful_termination.md) | Async `shutdown()`, background task cancellation |

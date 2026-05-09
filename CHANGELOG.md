@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `MitiflowDomain` and `TransportProfile` for explicit isolation; `LocalIsolated` is the default in tests and unconfigured binaries.
+
+### Changed
+
+- `mitiflow-cli`, `mitiflow-storage`, and `mitiflow-orchestrator` no longer call `zenoh::open(zenoh::Config::default())` directly; transport is configurable via YAML/env.
+
+### Docs
+
+- New `docs/21_domains.md`.
+
+### Migration
+
+- Existing `EventBusConfig.key_prefix` users are unaffected; advanced `&zenoh::Session` API preserved.
+
 ## [0.1.0] — Unreleased
 
 Initial release of mitiflow — a brokerless event streaming platform built on Zenoh.

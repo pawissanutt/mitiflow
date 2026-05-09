@@ -8,7 +8,9 @@ Kafka protocol compatibility are planned but not implemented yet.
 
 ## Features
 
-- **Brokerless** — Zenoh peer-to-peer mesh; no central broker to manage or scale
+- **Brokerless** — no central broker owns routing, offsets, or storage. Zenoh
+  transports range from localhost-only (`LocalIsolated`) to peer mesh
+  (`PeerMesh`) to router-connected (`Client`).
 - **Low-latency pub/sub** — events flow directly between publishers and subscribers via Zenoh
 - **Gap detection & recovery** — per-publisher sequence tracking with tiered recovery (store → publisher cache → backoff)
 - **Durable publishing** — single-store watermark-confirmed writes with configurable timeout
@@ -22,10 +24,16 @@ Kafka protocol compatibility are planned but not implemented yet.
 
 ## Architecture
 
-Mitiflow is **truly brokerless** — there is no central process that routes
-messages. Events flow directly from publishers to subscribers over Zenoh's
-peer-to-peer mesh. The components that *do* exist serve different roles than a
-traditional message broker:
+Mitiflow is **brokerless at the product semantics layer** — no Mitiflow broker
+owns routing policy, offsets, or storage. Events flow publisher → subscriber
+via Zenoh's native path. The transport profile controls how the Zenoh session
+connects: `LocalIsolated` and `PeerMesh` use direct peer links with no router,
+while `Client` may route through a Zenoh router for session establishment
+without adding Kafka-style broker semantics. See [Domains & Transport](docs/21_domains.md)
+for details.
+
+The components that *do* exist serve different roles than a traditional message
+broker:
 
 - **Event store** — a **sidecar storage layer**, not a message router. It
   persists events for durability, replay, and gap recovery. Publishers and
@@ -83,18 +91,18 @@ mitiflow = { version = "0.1", features = ["full"] }
 ### Basic pub/sub
 
 ```rust
-use mitiflow::{Event, EventBusConfig, EventPublisher, EventSubscriber};
+use mitiflow::{Event, EventPublisher, EventSubscriber, MitiflowDomain};
 
 #[tokio::main]
 async fn main() -> mitiflow::Result<()> {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::builder("demo").open().await?;
 
-    let config = EventBusConfig::builder("demo/sensors")
+    let config = domain.event_bus_config("sensors")?
         .cache_size(100)
         .build()?;
 
-    let subscriber = EventSubscriber::new(&session, config.clone()).await?;
-    let publisher = EventPublisher::new(&session, config).await?;
+    let subscriber = EventSubscriber::new(domain.session(), config.clone()).await?;
+    let publisher = EventPublisher::new(domain.session(), config).await?;
 
     // Publish
     let event = Event::new(serde_json::json!({"temp": 22.5}));
@@ -106,10 +114,12 @@ async fn main() -> mitiflow::Result<()> {
 
     drop(publisher);
     drop(subscriber);
-    session.close().await.unwrap();
+    domain.shutdown().await?;
     Ok(())
 }
 ```
+
+The examples below reuse `domain.session()` the same way. See [Domains](docs/21_domains.md) for transport profiles, namespaces, and multi-process setups.
 
 ### Keyed publishing with partition affinity
 
@@ -118,19 +128,19 @@ async fn main() -> mitiflow::Result<()> {
 publisher.publish_keyed("user-123", &event).await?;
 
 // Subscribe to a specific key
-let sub = EventSubscriber::new_keyed(&session, config, "user-123").await?;
+let sub = EventSubscriber::new_keyed(domain.session(), config, "user-123").await?;
 
 // Subscribe to a key prefix
-let sub = EventSubscriber::new_key_prefix(&session, config, "user-").await?;
+let sub = EventSubscriber::new_key_prefix(domain.session(), config, "user-").await?;
 ```
 
 ### Durable publishing (store-confirmed)
 
 ```rust
-let config = EventBusConfig::builder("demo/durable")
+let config = domain.event_bus_config("durable")?
     .durable_timeout(Duration::from_secs(5))
     .build()?;
-let publisher = EventPublisher::new(&session, config).await?;
+let publisher = EventPublisher::new(domain.session(), config).await?;
 
 // Blocks until the event store confirms persistence
 publisher.publish_durable(&event).await?;
@@ -148,7 +158,7 @@ let group_config = ConsumerGroupConfig {
     offset_reset: OffsetReset::Earliest,
 };
 
-let consumer = ConsumerGroupSubscriber::new(&session, config, group_config).await?;
+let consumer = ConsumerGroupSubscriber::new(domain.session(), config, group_config).await?;
 let event: Event<MyPayload> = consumer.recv().await?;
 // Offsets are committed automatically every 5 seconds
 ```
@@ -236,6 +246,7 @@ Full documentation is in [`docs/`](docs/index.md):
 | [Getting Started](docs/getting_started.md) | Step-by-step tutorial: installation, pub/sub, keyed events, durable writes, consumer groups |
 | [Deployment Guide](docs/deployment.md) | Dev mode, containers, compose stack, Zenoh topology, monitoring, troubleshooting |
 | [Configuration Reference](docs/configuration.md) | Complete reference for all config options, codec selection, common patterns |
+| [Domains & Transport](docs/21_domains.md) | Domain isolation, namespaces, transport profiles, and YAML/env configuration |
 
 ### Design Documents
 

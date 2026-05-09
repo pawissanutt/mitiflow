@@ -50,6 +50,17 @@ cargo bench -p mitiflow --bench codec                     # Single benchmark
 cd mitiflow-ui && pnpm test                               # Vitest
 ```
 
+## Domains
+
+- Use `MitiflowDomain` for Zenoh session setup; see `docs/21_domains.md` for the full domain, namespace, and transport guide.
+- Tests must use `MitiflowDomain::isolated_for_test("unique_test_name")`, not raw `zenoh::open(zenoh::Config::default())`; keep unique test names and the multi-thread Tokio runtime rule.
+- Unconfigured binaries and default domain opens use `LocalIsolated`.
+- Transport profiles:
+  - `LocalIsolated`: default, localhost-only, no router, no scouting.
+  - `Client`: explicit Zenoh router endpoints, requires connect.
+  - `PeerMesh`: explicit peer endpoints, no router, requires connect.
+  - `Ambient`: opt-in Zenoh defaults/discovery, warning logged.
+
 ## Lint & Format
 
 ```bash

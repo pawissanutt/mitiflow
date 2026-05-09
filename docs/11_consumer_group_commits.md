@@ -719,8 +719,8 @@ impl EventSubscriber {
 ```rust
 use mitiflow::*;
 
-let session = zenoh::open(zenoh::Config::default()).await?;
-let config = EventBusConfig::builder("orders/events")
+let domain = MitiflowDomain::builder("orders").open().await?;
+let config = domain.event_bus_config("events")?
     .num_partitions(16)
     .build()?;
 
@@ -731,7 +731,7 @@ let group = ConsumerGroupConfig {
     offset_reset: OffsetReset::Earliest,
 };
 
-let subscriber = EventSubscriber::new_consumer_group(&session, config, group).await?;
+let subscriber = EventSubscriber::new_consumer_group(domain.session(), config, group).await?;
 
 // Process events
 while let Ok(event) = subscriber.recv::<OrderEvent>().await {
@@ -743,6 +743,7 @@ while let Ok(event) = subscriber.recv::<OrderEvent>().await {
 
 // On shutdown: final commit + cleanup
 subscriber.shutdown().await;
+domain.shutdown().await?;
 ```
 
 ---
