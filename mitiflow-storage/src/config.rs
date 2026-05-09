@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use mitiflow::EventBusConfig;
+use mitiflow::{DomainYamlConfig, EventBusConfig, TransportYamlConfig};
 use tracing::info;
 
 use crate::error::AgentError;
@@ -467,6 +467,14 @@ impl StorageAgentConfig {
 /// YAML file configuration for a storage agent.
 ///
 /// ```yaml
+/// domain:
+///   id: my-domain
+///   namespace: optional/override
+///
+/// transport:
+///   profile: local-isolated
+///   connect: ["tcp/router:7447"]
+///
 /// node:
 ///   id: auto
 ///   data_dir: /var/lib/mitiflow
@@ -486,8 +494,12 @@ impl StorageAgentConfig {
 ///     num_partitions: 16
 ///     replication_factor: 2
 /// ```
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct AgentYamlConfig {
+    #[serde(default)]
+    pub domain: DomainYamlConfig,
+    #[serde(default)]
+    pub transport: TransportYamlConfig,
     #[serde(default)]
     pub node: NodeYamlConfig,
     #[serde(default)]

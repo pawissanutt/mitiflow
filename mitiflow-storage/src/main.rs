@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use mitiflow::EventBusConfig;
+use mitiflow::{DomainRuntimeConfig, EventBusConfig, MitiflowDomain};
 use mitiflow_storage::{AgentYamlConfig, StorageAgent, StorageAgentConfig};
 use tracing_subscriber::EnvFilter;
 
@@ -29,22 +29,33 @@ struct Cli {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
+    if let Err(err) = run().await {
+        eprintln!("Error: {err}");
+        if is_config_error(&err) {
+            std::process::exit(2);
+        }
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let yaml_config = match cli.config {
+        Some(config_path) => Some(AgentYamlConfig::from_file(&config_path)?),
+        None => None,
+    };
 
-    let session = zenoh::open(zenoh::Config::default())
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let domain = open_storage_domain(yaml_config.as_ref()).await?;
 
-    let mut agent = if let Some(config_path) = cli.config {
+    let mut agent = if let Some(yaml_config) = yaml_config {
         // YAML config mode
-        let yaml_config = AgentYamlConfig::from_file(&config_path)?;
         let agent_config = yaml_config.into_agent_config()?;
-        StorageAgent::start_multi(&session, agent_config).await?
+        StorageAgent::start_multi(domain.session(), agent_config).await?
     } else {
         // Legacy env-var mode
         let key_prefix = std::env::var("MITIFLOW_KEY_PREFIX").unwrap_or_else(|_| "mitiflow".into());
@@ -76,8 +87,10 @@ async fn main() -> anyhow::Result<()> {
         }
 
         let config = builder.build()?;
-        StorageAgent::start(&session, config).await?
+        StorageAgent::start(domain.session(), config).await?
     };
+
+    tracing::info!("storage agent running, press Ctrl+C to stop");
 
     // Wait for SIGINT (Ctrl+C) or SIGTERM (container stop)
     tokio::select! {
@@ -87,7 +100,38 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("shutting down agent...");
     agent.shutdown().await?;
-    session.close().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+    domain.shutdown().await?;
 
     Ok(())
+}
+
+fn is_config_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<mitiflow::Error>()
+            .is_some_and(|err| matches!(err, mitiflow::Error::Domain(_)))
+            || cause
+                .downcast_ref::<mitiflow_storage::AgentError>()
+                .is_some_and(|err| matches!(err, mitiflow_storage::AgentError::Config(_)))
+    })
+}
+
+async fn open_storage_domain(config: Option<&AgentYamlConfig>) -> anyhow::Result<MitiflowDomain> {
+    let runtime = DomainRuntimeConfig::from_sources(
+        "storage",
+        config.map(|config| &config.domain),
+        config.map(|config| &config.transport),
+    )?;
+    let domain = runtime.open().await?;
+    let transport_profile = format!("{:?}", domain.transport());
+    tracing::info!(
+        domain.id = %domain.id(),
+        namespace.root = %domain.namespace().root(),
+        transport.profile = %transport_profile,
+        "mitiflow domain started domain.id={} namespace.root={} transport.profile={}",
+        domain.id(),
+        domain.namespace().root(),
+        transport_profile
+    );
+    Ok(domain)
 }
