@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use mitiflow::EventBusConfig;
+use mitiflow::{EventBusConfig, MitiflowDomain};
 use mitiflow_storage::membership::{MembershipEvent, MembershipTracker};
 use mitiflow_storage::{StorageAgentConfig, StorageAgentConfigBuilder};
 use tokio::sync::Notify;
@@ -44,18 +44,22 @@ async fn declare_agent_token(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tracker_discovers_existing_nodes() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("membership_discover")
+        .await
+        .unwrap();
     let prefix = "test/membership_discover";
 
     // Pre-declare 2 peer liveliness tokens before the tracker starts.
-    let _token_a = declare_agent_token(&session, prefix, "node-a").await;
-    let _token_b = declare_agent_token(&session, prefix, "node-b").await;
+    let _token_a = declare_agent_token(domain.session(), prefix, "node-a").await;
+    let _token_b = declare_agent_token(domain.session(), prefix, "node-b").await;
 
     // Small settle delay for Zenoh propagation.
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let config = agent_config("membership_discover", "node-self");
-    let tracker = MembershipTracker::new(&session, &config).await.unwrap();
+    let tracker = MembershipTracker::new(domain.session(), &config)
+        .await
+        .unwrap();
 
     let nodes = tracker.current_nodes().await;
     // Should see self + 2 peers = 3 total.
@@ -78,14 +82,18 @@ async fn tracker_discovers_existing_nodes() {
     );
 
     tracker.shutdown().await;
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tracker_detects_node_join() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("membership_join")
+        .await
+        .unwrap();
     let config = agent_config("membership_join", "node-self");
-    let tracker = MembershipTracker::new(&session, &config).await.unwrap();
+    let tracker = MembershipTracker::new(domain.session(), &config)
+        .await
+        .unwrap();
 
     // Register callback that signals when a node joins.
     let join_notify = Arc::new(Notify::new());
@@ -106,7 +114,7 @@ async fn tracker_detects_node_join() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Declare a new peer — this should trigger the callback.
-    let _token = declare_agent_token(&session, "test/membership_join", "node-new").await;
+    let _token = declare_agent_token(domain.session(), "test/membership_join", "node-new").await;
 
     // Wait for callback, with a timeout.
     tokio::time::timeout(Duration::from_secs(5), join_notify.notified())
@@ -127,21 +135,26 @@ async fn tracker_detects_node_join() {
     );
 
     tracker.shutdown().await;
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tracker_detects_node_leave() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    // Use a separate session for the peer to ensure liveliness events propagate.
-    let peer_session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("membership_leave")
+        .await
+        .unwrap();
+    // Use a separate joined session for the peer to ensure liveliness events propagate.
+    let peer_domain = domain.join_isolated().await.unwrap();
     let config = agent_config("membership_leave", "node-self");
 
     // Pre-declare a peer on the separate session.
-    let token = declare_agent_token(&peer_session, "test/membership_leave", "node-temp").await;
+    let token =
+        declare_agent_token(peer_domain.session(), "test/membership_leave", "node-temp").await;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let tracker = MembershipTracker::new(&session, &config).await.unwrap();
+    let tracker = MembershipTracker::new(domain.session(), &config)
+        .await
+        .unwrap();
 
     // Verify peer is initially seen.
     let nodes = tracker.current_nodes().await;
@@ -183,15 +196,19 @@ async fn tracker_detects_node_leave() {
     assert!(!ids.contains(&"node-temp"), "left node should be removed");
 
     tracker.shutdown().await;
-    peer_session.close().await.unwrap();
-    session.close().await.unwrap();
+    peer_domain.shutdown().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tracker_ignores_self() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("membership_self")
+        .await
+        .unwrap();
     let config = agent_config("membership_self", "node-me");
-    let tracker = MembershipTracker::new(&session, &config).await.unwrap();
+    let tracker = MembershipTracker::new(domain.session(), &config)
+        .await
+        .unwrap();
 
     // peer_nodes() must never include "node-me".
     let peers = tracker.peer_nodes().await;
@@ -207,23 +224,27 @@ async fn tracker_ignores_self() {
     assert_eq!(count, 1, "current_nodes should include self exactly once");
 
     tracker.shutdown().await;
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tracker_provides_consistent_node_list() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    // Use a separate session for peer tokens so liveliness events propagate
+    let domain = MitiflowDomain::isolated_for_test("membership_consistent")
+        .await
+        .unwrap();
+    // Use a separate joined session for peer tokens so liveliness events propagate
     // reliably through the Zenoh routing layer.
-    let peer_session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let peer_domain = domain.join_isolated().await.unwrap();
     let config = agent_config("membership_consistent", "node-self");
-    let tracker = MembershipTracker::new(&session, &config).await.unwrap();
+    let tracker = MembershipTracker::new(domain.session(), &config)
+        .await
+        .unwrap();
 
     // Declare several peers on the separate session.
     let mut tokens = Vec::new();
     for i in 0..5 {
         let t = declare_agent_token(
-            &peer_session,
+            peer_domain.session(),
             "test/membership_consistent",
             &format!("node-{i}"),
         )
@@ -273,13 +294,15 @@ async fn tracker_provides_consistent_node_list() {
     assert!(ids.contains(&"node-1"), "node-1 should still be present");
 
     tracker.shutdown().await;
-    peer_session.close().await.unwrap();
-    session.close().await.unwrap();
+    peer_domain.shutdown().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tracker_metadata_propagation() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("membership_meta")
+        .await
+        .unwrap();
 
     // Start a tracker with capacity and labels.
     let bus_config = EventBusConfig::builder("test/membership_meta")
@@ -299,7 +322,9 @@ async fn tracker_metadata_propagation() {
     .build()
     .unwrap();
 
-    let tracker_a = MembershipTracker::new(&session, &config).await.unwrap();
+    let tracker_a = MembershipTracker::new(domain.session(), &config)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Start a second tracker that should discover agent-a.
@@ -313,7 +338,9 @@ async fn tracker_metadata_propagation() {
     .build()
     .unwrap();
 
-    let tracker_b = MembershipTracker::new(&session, &config_b).await.unwrap();
+    let tracker_b = MembershipTracker::new(domain.session(), &config_b)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // tracker_b should see agent-a with capacity=200 and rack label.
@@ -330,5 +357,5 @@ async fn tracker_metadata_propagation() {
 
     tracker_a.shutdown().await;
     tracker_b.shutdown().await;
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
