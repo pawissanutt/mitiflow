@@ -11,19 +11,22 @@ This guide covers deploying Mitiflow — from single-node development to multi-n
 1. [Deployment Modes](#1-deployment-modes)
 2. [Dev Mode (Single Process)](#2-dev-mode-single-process)
 3. [Production with Containers](#3-production-with-containers)
-4. [Environment Variables](#4-environment-variables)
-5. [Building Container Images](#5-building-container-images)
-6. [Compose Stack](#6-compose-stack)
-7. [Without Containers](#7-without-containers)
-8. [Zenoh Network Topology](#8-zenoh-network-topology)
-9. [Monitoring & Observability](#9-monitoring--observability)
-10. [Troubleshooting](#10-troubleshooting)
+4. [Domain & Transport Configuration](#4-domain--transport-configuration)
+5. [Environment Variables](#5-environment-variables)
+6. [Building Container Images](#6-building-container-images)
+7. [Compose Stack](#7-compose-stack)
+8. [Without Containers](#8-without-containers)
+9. [Zenoh Network Topology](#9-zenoh-network-topology)
+10. [Monitoring & Observability](#10-monitoring--observability)
+11. [Troubleshooting](#11-troubleshooting)
 
 ---
 
 ## 1. Deployment Modes
 
-Mitiflow is brokerless — there is no central process that routes messages. You choose how many operational components to run based on your needs:
+Mitiflow is brokerless at the product semantics layer — no Mitiflow broker owns
+routing policy, offsets, or storage. You choose how many operational components
+to run based on your needs:
 
 | Mode | Components | Use case |
 |------|-----------|----------|
@@ -31,7 +34,12 @@ Mitiflow is brokerless — there is no central process that routes messages. You
 | **Dev mode** | `mitiflow dev` (all-in-one) | Local development and testing |
 | **Production** | Storage agent(s) + Orchestrator (optional) + optional explicit Zenoh routing | Multi-node deployments |
 
-**Key insight:** The orchestrator and storage agent are *operational utilities*, not message routers. Your publishers and subscribers communicate directly over Zenoh peer-to-peer — the system works without any infrastructure processes.
+**Key insight:** The orchestrator and storage agent are *operational utilities*,
+not message brokers. Publishers and subscribers exchange events over Zenoh's
+native path. `LocalIsolated` and `PeerMesh` need no router; `Client` may route
+traffic through a Zenoh router for session establishment without adding Mitiflow
+broker semantics. The system works without any Mitiflow infrastructure
+processes.
 
 > **See also:** [Architecture](02_architecture.md) for component roles, [Distributed Storage](13_distributed_storage.md) for multi-node storage design.
 
@@ -76,13 +84,13 @@ mitiflow ctl diagnose
 ### Architecture
 
 ```
-┌──────────────────┐      Zenoh peer mesh      ┌──────────────┐
+┌──────────────────┐         Zenoh path         ┌──────────────┐
 │   Orchestrator    │◄────────────────────────►│    Storage    │
 │  (HTTP API :8080) │                          │    Agent      │
 │  + embedded UI    │                          │  (fjall LSM)  │
 └─────────┬────────┘                          └──────┬───────┘
           │                                          │
-          │              Zenoh peer mesh             │
+          │              Zenoh path                  │
           ▼                                          ▼
 ┌──────────────────┐                          ┌──────────────┐
 │  Publisher       │◄────────────────────────►│  Subscriber  │
@@ -90,17 +98,60 @@ mitiflow ctl diagnose
 └──────────────────┘                          └──────────────┘
 ```
 
-The checked-in compose stack uses the production binaries' current default Zenoh
-configuration, which means peer discovery rather than an explicit router
-endpoint. Messages flow directly between publishers and subscribers.
+The checked-in compose stack runs each component with its own `MitiflowDomain`.
+By default, unconfigured binaries use `LocalIsolated` (no external discovery).
+For multi-process communication across containers, configure an explicit profile
+such as `Client` or `PeerMesh` with endpoints, or opt into `Ambient` discovery.
+Events flow publisher → subscriber over Zenoh's native path.
 
 ---
 
-## 4. Environment Variables
+## 4. Domain & Transport Configuration
+
+Every Mitiflow binary and library entry point opens a `MitiflowDomain` that bundles the Zenoh session, namespace, and transport profile into one unit. You configure it through YAML, environment variables, or programmatically.
+
+### YAML schema
+
+```yaml
+domain:
+  id: my-domain          # optional; default = binary-specific fallback
+  namespace: myapp/prod  # optional; default = mitiflow/{id}
+transport:
+  profile: local-isolated   # optional; default = local-isolated
+  connect:                  # required for client and peer-mesh
+    - "tcp/router-1:7447"
+    - "tcp/router-2:7447"
+```
+
+Supported `profile` strings (case-insensitive, hyphens and underscores ignored):
+
+- `local-isolated` — single-process or local-only testing; no router needed
+- `client` — connects to known Zenoh router(s); requires `connect` endpoints
+- `peer-mesh` — direct peer links; no central router; requires `connect` endpoints
+- `ambient` — uses Zenoh defaults, including multicast discovery; opt-in and logs a warning
+
+`LocalIsolated` and `PeerMesh` preserve brokerless operation. `Client` may route through a Zenoh router for session establishment, but Mitiflow does not add Kafka-style broker semantics. See [Domains & Transport](21_domains.md) for full profile semantics and migration from raw `zenoh::open` setups.
+
+### Resolution precedence
+
+1. Explicit CLI transport override (highest)
+2. Environment variables
+3. YAML file values
+4. Built-in defaults (lowest)
+
+`client` and `peer-mesh` profiles exit non-zero at startup if `connect` is empty after all sources are resolved.
+
+---
+
+## 5. Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MITIFLOW_KEY_PREFIX` | `mitiflow` | Zenoh key expression prefix for all topics |
+| `MITIFLOW_DOMAIN_ID` | — | Overrides `domain.id` in YAML |
+| `MITIFLOW_DOMAIN_NAMESPACE` | — | Overrides `domain.namespace` in YAML |
+| `MITIFLOW_TRANSPORT_PROFILE` | `local-isolated` | Overrides `transport.profile` in YAML |
+| `MITIFLOW_TRANSPORT_CONNECT` | — | Comma-separated endpoints; overrides `transport.connect` in YAML |
+| `MITIFLOW_KEY_PREFIX` | `mitiflow` | Zenoh key expression prefix for all topics (legacy; defaults to domain namespace when absent) |
 | `MITIFLOW_DATA_DIR` | `/data` | Directory for persistent storage (fjall LSM) |
 | `MITIFLOW_HTTP_BIND` | `0.0.0.0:8080` | Orchestrator HTTP bind address |
 | `MITIFLOW_AUTH_TOKEN` | — | Bearer token required for orchestrator HTTP API and UI when set |
@@ -109,7 +160,7 @@ endpoint. Messages flow directly between publishers and subscribers.
 
 ---
 
-## 5. Building Container Images
+## 6. Building Container Images
 
 The [`Containerfile`](../Containerfile) uses a multi-stage build optimized for caching:
 
@@ -133,7 +184,7 @@ just container-all          # Both images
 
 ---
 
-## 6. Compose Stack
+## 7. Compose Stack
 
 The [`docker-compose.yml`](../docker-compose.yml) defines a ready-to-use two-service stack:
 
@@ -165,7 +216,7 @@ podman compose down -v
 
 ---
 
-## 7. Without Containers
+## 8. Without Containers
 
 Run each component as a standalone binary:
 
@@ -214,23 +265,38 @@ only on localhost/private networks or behind TLS termination in production.
 
 ---
 
-## 8. Zenoh Network Topology
+## 9. Zenoh Network Topology
 
-Mitiflow supports two Zenoh topologies:
+Mitiflow uses four transport profiles. The profile you choose determines the
+network topology:
 
-### Peer-to-Peer (default for dev)
+### LocalIsolated (default)
 
-All nodes discover each other via multicast scouting. Simple but limited to a single network segment.
+Binds to a localhost ephemeral port. Disables multicast and gossip scouting.
+No external discovery. Perfect for single-process apps and local dev.
 
 ```
-┌─────────┐     multicast     ┌─────────┐
-│  Node A │◄────scouting────►│  Node B │
-└─────────┘                   └─────────┘
+┌─────────────┐    localhost     ┌─────────────┐
+│  Process A  │◄───tcp/127...──►│  Process B  │
+│ (same host) │    (same domain) │ (same host) │
+└─────────────┘                  └─────────────┘
 ```
 
-### Routed (recommended for production)
+### PeerMesh
 
-A Zenoh router provides a stable rendezvous point. Nodes connect via TCP. Works across network boundaries.
+Peers connect to each other directly via explicit endpoints. No router required.
+Preserves brokerless operation across hosts.
+
+```
+┌─────────┐     tcp/...      ┌─────────┐
+│  Node A │◄───────────────►│  Node B │
+└─────────┘                  └─────────┘
+```
+
+### Client
+
+Connects to known Zenoh router(s) for session establishment. Traffic may route
+through the router, but Mitiflow does not add broker semantics.
 
 ```
 ┌─────────┐     tcp/7447     ┌──────────┐     tcp/7447     ┌─────────┐
@@ -238,15 +304,28 @@ A Zenoh router provides a stable rendezvous point. Nodes connect via TCP. Works 
 └─────────┘                  └──────────┘                  └─────────┘
 ```
 
-Mitiflow currently opens Zenoh with the default Zenoh configuration in the
-production binaries; first-class Mitiflow YAML/env plumbing for explicit router
-endpoints and TLS/mTLS profiles is planned.
+### Ambient
+
+Uses Zenoh defaults, including multicast scouting and gossip discovery. May find
+routers or peers automatically on the local network. Opt-in; logs a warning at
+startup.
+
+```
+┌─────────┐     multicast     ┌─────────┐
+│  Node A │◄────scouting────►│  Node B │
+└─────────┘                   └─────────┘
+```
+
+Production binaries open a `MitiflowDomain` with the transport profile selected
+via YAML or environment variables. See [Domain & Transport
+Configuration](#4-domain--transport-configuration) and [Domains &
+Transport](21_domains.md) for profile selection and explicit endpoint setup.
 
 > **See also:** [Zenoh Capabilities](01_zenoh_capabilities.md) for the stable Zenoh APIs Mitiflow relies on.
 
 ---
 
-## 9. Monitoring & Observability
+## 10. Monitoring & Observability
 
 ### Orchestrator HTTP API
 
@@ -294,11 +373,14 @@ mitiflow ctl diagnose --timeout 10
 
 ---
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 ### "Unable to push non droppable network message — Closing transport!"
 
-**Cause:** Stale Zenoh peers from previous runs remain in the multicast scouting mesh, causing transport buffer overflow.
+**Cause:** When using `Ambient` transport or explicit multicast scouting, stale
+Zenoh peers from previous runs may remain in the discovery mesh, causing
+transport buffer overflow. This does not occur with `LocalIsolated` (default) or
+`Client`/`PeerMesh` with scouting disabled.
 
 **Fix:** Kill orphaned processes before restarting:
 ```bash
@@ -314,9 +396,15 @@ pkill -9 -f mitiflow
 
 ### Consumer group not rebalancing
 
-**Cause:** Liveliness tokens require Zenoh router or peer-to-peer scouting to propagate leave events.
+**Cause:** Liveliness tokens require a shared Zenoh network to propagate leave
+events. With `LocalIsolated` (default), members must be in the same domain
+session or joined via `join_isolated()`. With `Client` or `PeerMesh`, ensure all
+members connect to the same router or peer endpoints. With `Ambient`, ensure
+scouting can discover all members on the network.
 
-**Fix:** Ensure all members use the same `worker_liveliness_prefix` and are on the same Zenoh network.
+**Fix:** Ensure all members use the same `worker_liveliness_prefix` and are on
+the same Zenoh network. For multi-process setups, prefer an explicit profile
+(`Client` or `PeerMesh`) over `Ambient`.
 
 > **See also:** [Consumer Group Commits](11_consumer_group_commits.md) for the rebalancing protocol, [Graceful Termination](10_graceful_termination.md) for clean shutdown.
 
