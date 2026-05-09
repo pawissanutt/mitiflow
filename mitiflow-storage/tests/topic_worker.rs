@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use mitiflow::MitiflowDomain;
 use mitiflow_storage::SchemaStore;
 use mitiflow_storage::topic_worker::TopicWorker;
 use mitiflow_storage::{TopicEntry, TopicWorkerConfig};
@@ -40,11 +41,13 @@ fn test_schema_store() -> (tempfile::TempDir, Arc<SchemaStore>) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn topic_worker_starts_and_owns_partitions() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("tw_single")
+        .await
+        .unwrap();
     let (_tmp, config) = worker_config("tw_single", "events", 4, 1);
     let (_sd, ss) = test_schema_store();
 
-    let worker = TopicWorker::start(&session, "node-only", config, ss)
+    let worker = TopicWorker::start(domain.session(), "node-only", config, ss)
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -64,23 +67,25 @@ async fn topic_worker_starts_and_owns_partitions() {
     assert_eq!(worker.node_id(), "node-only");
 
     worker.shutdown().await.unwrap();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn topic_worker_two_nodes_split() {
-    let s1 = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let s2 = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let d1 = MitiflowDomain::isolated_for_test("tw_split").await.unwrap();
+    let d2 = d1.join_isolated().await.unwrap();
 
     let (_t1, c1) = worker_config("tw_split", "events", 8, 1);
     let (_t2, c2) = worker_config("tw_split", "events", 8, 1);
     let (_sd, ss) = test_schema_store();
 
-    let w1 = TopicWorker::start(&s1, "node-a", c1, ss.clone())
+    let w1 = TopicWorker::start(d1.session(), "node-a", c1, ss.clone())
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let w2 = TopicWorker::start(&s2, "node-b", c2, ss).await.unwrap();
+    let w2 = TopicWorker::start(d2.session(), "node-b", c2, ss)
+        .await
+        .unwrap();
 
     tokio::time::sleep(Duration::from_millis(1000)).await;
     w1.recompute_and_reconcile().await.unwrap();
@@ -108,17 +113,17 @@ async fn topic_worker_two_nodes_split() {
 
     w1.shutdown().await.unwrap();
     w2.shutdown().await.unwrap();
-    s1.close().await.unwrap();
-    s2.close().await.unwrap();
+    d2.shutdown().await.unwrap();
+    d1.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn topic_worker_shutdown_drains() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("tw_drain").await.unwrap();
     let (_tmp, config) = worker_config("tw_drain", "events", 4, 1);
     let (_sd, ss) = test_schema_store();
 
-    let worker = TopicWorker::start(&session, "node-only", config, ss)
+    let worker = TopicWorker::start(domain.session(), "node-only", config, ss)
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -130,22 +135,24 @@ async fn topic_worker_shutdown_drains() {
         "all stores should be stopped after shutdown"
     );
 
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn topic_worker_respects_overrides() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("tw_override")
+        .await
+        .unwrap();
 
     let (_t1, c1) = worker_config("tw_override", "events", 4, 1);
     let (_t2, c2) = worker_config("tw_override", "events", 4, 1);
     let (_sd, ss) = test_schema_store();
 
-    let w1 = TopicWorker::start(&session, "node-a", c1, ss.clone())
+    let w1 = TopicWorker::start(domain.session(), "node-a", c1, ss.clone())
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let w2 = TopicWorker::start(&session, "node-b", c2, ss)
+    let w2 = TopicWorker::start(domain.session(), "node-b", c2, ss)
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(1000)).await;
@@ -163,7 +170,7 @@ async fn topic_worker_respects_overrides() {
     };
     let override_key = "test/tw_override/_cluster/overrides";
     let bytes = serde_json::to_vec(&override_table).unwrap();
-    session.put(override_key, bytes).await.unwrap();
+    domain.session().put(override_key, bytes).await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(500)).await;
     w1.recompute_and_reconcile().await.unwrap();
@@ -179,28 +186,30 @@ async fn topic_worker_respects_overrides() {
 
     w1.shutdown().await.unwrap();
     w2.shutdown().await.unwrap();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn topic_worker_recompute_after_node_leave() {
-    let s1 = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let s2 = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let d1 = MitiflowDomain::isolated_for_test("tw_leave").await.unwrap();
+    let d2 = d1.join_isolated().await.unwrap();
 
     let (_t1, c1) = worker_config("tw_leave", "events", 6, 1);
     let (_t2, c2) = worker_config("tw_leave", "events", 6, 1);
     let (_sd, ss) = test_schema_store();
 
-    let w1 = TopicWorker::start(&s1, "node-a", c1, ss.clone())
+    let w1 = TopicWorker::start(d1.session(), "node-a", c1, ss.clone())
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let w2 = TopicWorker::start(&s2, "node-b", c2, ss).await.unwrap();
+    let w2 = TopicWorker::start(d2.session(), "node-b", c2, ss)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(1000)).await;
 
     // Shutdown w2.
     w2.shutdown().await.unwrap();
-    s2.close().await.unwrap();
+    d2.shutdown().await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(1500)).await;
     w1.recompute_and_reconcile().await.unwrap();
@@ -214,29 +223,31 @@ async fn topic_worker_recompute_after_node_leave() {
     );
 
     w1.shutdown().await.unwrap();
-    s1.close().await.unwrap();
+    d1.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn topic_worker_multi_replica_rf2() {
-    let s1 = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let s2 = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let s3 = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let d1 = MitiflowDomain::isolated_for_test("tw_rf2").await.unwrap();
+    let d2 = d1.join_isolated().await.unwrap();
+    let d3 = d1.join_isolated().await.unwrap();
 
     let (_t1, c1) = worker_config("tw_rf2", "events", 4, 2);
     let (_t2, c2) = worker_config("tw_rf2", "events", 4, 2);
     let (_t3, c3) = worker_config("tw_rf2", "events", 4, 2);
     let (_sd, ss) = test_schema_store();
 
-    let w1 = TopicWorker::start(&s1, "node-a", c1, ss.clone())
+    let w1 = TopicWorker::start(d1.session(), "node-a", c1, ss.clone())
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let w2 = TopicWorker::start(&s2, "node-b", c2, ss.clone())
+    let w2 = TopicWorker::start(d2.session(), "node-b", c2, ss.clone())
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let w3 = TopicWorker::start(&s3, "node-c", c3, ss).await.unwrap();
+    let w3 = TopicWorker::start(d3.session(), "node-c", c3, ss)
+        .await
+        .unwrap();
 
     tokio::time::sleep(Duration::from_millis(1500)).await;
     w1.recompute_and_reconcile().await.unwrap();
@@ -275,7 +286,7 @@ async fn topic_worker_multi_replica_rf2() {
     w1.shutdown().await.unwrap();
     w2.shutdown().await.unwrap();
     w3.shutdown().await.unwrap();
-    s1.close().await.unwrap();
-    s2.close().await.unwrap();
-    s3.close().await.unwrap();
+    d3.shutdown().await.unwrap();
+    d2.shutdown().await.unwrap();
+    d1.shutdown().await.unwrap();
 }
