@@ -18,8 +18,10 @@ fn temp_dir(name: &str) -> tempfile::TempDir {
     common::temp_dir(name)
 }
 
-fn replay_config(test_name: &str) -> EventBusConfig {
-    EventBusConfig::builder(format!("test/{test_name}"))
+fn replay_config(domain: &mitiflow::MitiflowDomain) -> EventBusConfig {
+    domain
+        .event_bus_config("events")
+        .expect("valid topic")
         .cache_size(100)
         .heartbeat(HeartbeatMode::Disabled)
         .history_on_subscribe(false)
@@ -27,14 +29,6 @@ fn replay_config(test_name: &str) -> EventBusConfig {
         .num_partitions(1)
         .build()
         .unwrap()
-}
-
-/// Open a Zenoh session with timestamping enabled so that published samples
-/// carry HLC timestamps, which are required for the replay index.
-async fn open_session() -> zenoh::Session {
-    let mut cfg = zenoh::Config::default();
-    cfg.insert_json5("timestamping/enabled", "true").unwrap();
-    zenoh::open(cfg).await.unwrap()
 }
 
 async fn publish_and_wait(publisher: &EventPublisher, count: u64) {
@@ -49,18 +43,20 @@ async fn publish_and_wait(publisher: &EventPublisher, count: u64) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replay_all_events_bounded() {
-    let session = open_session().await;
+    let domain = common::isolated_domain("replay_all").await;
     let dir = temp_dir("replay_all");
-    let config = replay_config("replay_all");
+    let config = replay_config(&domain);
 
     let backend = FjallBackend::open(dir.path(), 0).unwrap();
-    let mut store = EventStore::new(&session, backend, config.clone());
+    let mut store = EventStore::new(domain.session(), backend, config.clone());
     store.run().await.unwrap();
 
-    let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
     publish_and_wait(&publisher, 5).await;
 
-    let mut replayer = EventReplayer::builder(&session, config.clone())
+    let mut replayer = EventReplayer::builder(domain.session(), config.clone())
         .partition(0)
         .start(ReplayPosition::Earliest)
         .end(ReplayEnd::Bounded { limit: 100 })
@@ -86,23 +82,25 @@ async fn replay_all_events_bounded() {
     replayer.shutdown().await;
     drop(publisher);
     store.shutdown();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replay_after_hlc_skips_earlier() {
-    let session = open_session().await;
+    let domain = common::isolated_domain("replay_after_hlc").await;
     let dir = temp_dir("replay_after_hlc");
-    let config = replay_config("replay_after_hlc");
+    let config = replay_config(&domain);
 
     let backend = FjallBackend::open(dir.path(), 0).unwrap();
-    let mut store = EventStore::new(&session, backend, config.clone());
+    let mut store = EventStore::new(domain.session(), backend, config.clone());
     store.run().await.unwrap();
 
-    let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
     publish_and_wait(&publisher, 10).await;
 
-    let mut replayer = EventReplayer::builder(&session, config.clone())
+    let mut replayer = EventReplayer::builder(domain.session(), config.clone())
         .partition(0)
         .batch_size(10)
         .build()
@@ -113,7 +111,7 @@ async fn replay_after_hlc_skips_earlier() {
     assert!(batch.len() >= 5, "should have at least 5 events");
     let hlc_at_5 = batch[4].metadata.hlc_timestamp.unwrap();
 
-    let mut replayer2 = EventReplayer::builder(&session, config.clone())
+    let mut replayer2 = EventReplayer::builder(domain.session(), config.clone())
         .partition(0)
         .start(ReplayPosition::AfterHlc(hlc_at_5))
         .end(ReplayEnd::Bounded { limit: 100 })
@@ -139,23 +137,25 @@ async fn replay_after_hlc_skips_earlier() {
     replayer2.shutdown().await;
     drop(publisher);
     store.shutdown();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replay_bounded_limit() {
-    let session = open_session().await;
+    let domain = common::isolated_domain("replay_bounded").await;
     let dir = temp_dir("replay_bounded");
-    let config = replay_config("replay_bounded");
+    let config = replay_config(&domain);
 
     let backend = FjallBackend::open(dir.path(), 0).unwrap();
-    let mut store = EventStore::new(&session, backend, config.clone());
+    let mut store = EventStore::new(domain.session(), backend, config.clone());
     store.run().await.unwrap();
 
-    let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
     publish_and_wait(&publisher, 20).await;
 
-    let mut replayer = EventReplayer::builder(&session, config.clone())
+    let mut replayer = EventReplayer::builder(domain.session(), config.clone())
         .partition(0)
         .end(ReplayEnd::Bounded { limit: 7 })
         .batch_size(3)
@@ -177,23 +177,25 @@ async fn replay_bounded_limit() {
     replayer.shutdown().await;
     drop(publisher);
     store.shutdown();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replay_commit_and_resume() {
-    let session = open_session().await;
+    let domain = common::isolated_domain("replay_commit").await;
     let dir = temp_dir("replay_commit");
-    let config = replay_config("replay_commit");
+    let config = replay_config(&domain);
 
     let backend = FjallBackend::open(dir.path(), 0).unwrap();
-    let mut store = EventStore::new(&session, backend, config.clone());
+    let mut store = EventStore::new(domain.session(), backend, config.clone());
     store.run().await.unwrap();
 
-    let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
     publish_and_wait(&publisher, 10).await;
 
-    let mut replayer = EventReplayer::builder(&session, config.clone())
+    let mut replayer = EventReplayer::builder(domain.session(), config.clone())
         .partition(0)
         .end(ReplayEnd::Bounded { limit: 5 })
         .build()
@@ -215,7 +217,7 @@ async fn replay_commit_and_resume() {
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let mut replayer2 = EventReplayer::builder(&session, config.clone())
+    let mut replayer2 = EventReplayer::builder(domain.session(), config.clone())
         .partition(0)
         .start(ReplayPosition::CommittedOffset {
             group_id: "test-group".into(),
@@ -242,16 +244,16 @@ async fn replay_commit_and_resume() {
     replayer2.shutdown().await;
     drop(publisher);
     store.shutdown();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replay_local_backend() {
     use std::sync::Arc;
 
-    let session = open_session().await;
+    let domain = common::isolated_domain("replay_local").await;
     let dir = temp_dir("replay_local");
-    let config = replay_config("replay_local");
+    let config = replay_config(&domain);
 
     let backend = FjallBackend::open(dir.path(), 0).unwrap();
     let pub_id = PublisherId::new();
@@ -278,7 +280,7 @@ async fn replay_local_backend() {
 
     let backend_arc: Arc<dyn StorageBackend> = Arc::new(backend);
 
-    let mut replayer = EventReplayer::builder(&session, config)
+    let mut replayer = EventReplayer::builder(domain.session(), config)
         .partition(0)
         .local_backend(backend_arc)
         .end(ReplayEnd::Bounded { limit: 100 })
@@ -301,23 +303,25 @@ async fn replay_local_backend() {
     }
 
     replayer.shutdown().await;
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replay_then_live_seamless() {
-    let session = open_session().await;
+    let domain = common::isolated_domain("replay_then_live").await;
     let dir = temp_dir("replay_then_live");
-    let config = replay_config("replay_then_live");
+    let config = replay_config(&domain);
 
     let backend = FjallBackend::open(dir.path(), 0).unwrap();
-    let mut store = EventStore::new(&session, backend, config.clone());
+    let mut store = EventStore::new(domain.session(), backend, config.clone());
     store.run().await.unwrap();
 
-    let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
     publish_and_wait(&publisher, 5).await;
 
-    let mut replayer = EventReplayer::builder(&session, config.clone())
+    let mut replayer = EventReplayer::builder(domain.session(), config.clone())
         .partition(0)
         .end(ReplayEnd::ThenLive)
         .build()
@@ -354,23 +358,25 @@ async fn replay_then_live_seamless() {
     replayer.shutdown().await;
     drop(publisher);
     store.shutdown();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replay_into_live() {
-    let session = open_session().await;
+    let domain = common::isolated_domain("replay_into_live").await;
     let dir = temp_dir("replay_into_live");
-    let config = replay_config("replay_into_live");
+    let config = replay_config(&domain);
 
     let backend = FjallBackend::open(dir.path(), 0).unwrap();
-    let mut store = EventStore::new(&session, backend, config.clone());
+    let mut store = EventStore::new(domain.session(), backend, config.clone());
     store.run().await.unwrap();
 
-    let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
     publish_and_wait(&publisher, 5).await;
 
-    let mut replayer = EventReplayer::builder(&session, config.clone())
+    let mut replayer = EventReplayer::builder(domain.session(), config.clone())
         .partition(0)
         .end(ReplayEnd::Bounded { limit: 100 })
         .build()
@@ -385,7 +391,7 @@ async fn replay_into_live() {
         }
     }
 
-    let live_sub = replayer.into_live(&session).await.unwrap();
+    let live_sub = replayer.into_live(domain.session()).await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     for i in 5..8u64 {
@@ -407,20 +413,22 @@ async fn replay_into_live() {
     live_sub.shutdown().await;
     drop(publisher);
     store.shutdown();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replay_key_scoped() {
-    let session = open_session().await;
+    let domain = common::isolated_domain("replay_key").await;
     let dir = temp_dir("replay_key");
-    let config = replay_config("replay_key");
+    let config = replay_config(&domain);
 
     let backend = FjallBackend::open(dir.path(), 0).unwrap();
-    let mut store = EventStore::new(&session, backend, config.clone());
+    let mut store = EventStore::new(domain.session(), backend, config.clone());
     store.run().await.unwrap();
 
-    let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
 
     publisher
         .publish_keyed("alpha", &Event::new(TestPayload { value: 1 }))
@@ -445,7 +453,7 @@ async fn replay_key_scoped() {
 
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let mut replayer = EventReplayer::builder(&session, config.clone())
+    let mut replayer = EventReplayer::builder(domain.session(), config.clone())
         .key("alpha")
         .end(ReplayEnd::Bounded { limit: 100 })
         .build()
@@ -469,23 +477,25 @@ async fn replay_key_scoped() {
     replayer.shutdown().await;
     drop(publisher);
     store.shutdown();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replay_stream_adapter() {
-    let session = open_session().await;
+    let domain = common::isolated_domain("replay_stream").await;
     let dir = temp_dir("replay_stream");
-    let config = replay_config("replay_stream");
+    let config = replay_config(&domain);
 
     let backend = FjallBackend::open(dir.path(), 0).unwrap();
-    let mut store = EventStore::new(&session, backend, config.clone());
+    let mut store = EventStore::new(domain.session(), backend, config.clone());
     store.run().await.unwrap();
 
-    let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
     publish_and_wait(&publisher, 5).await;
 
-    let mut replayer = EventReplayer::builder(&session, config.clone())
+    let mut replayer = EventReplayer::builder(domain.session(), config.clone())
         .partition(0)
         .end(ReplayEnd::Bounded { limit: 100 })
         .build()
@@ -506,5 +516,5 @@ async fn replay_stream_adapter() {
     replayer.shutdown().await;
     drop(publisher);
     store.shutdown();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }

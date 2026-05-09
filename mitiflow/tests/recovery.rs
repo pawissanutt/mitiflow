@@ -24,9 +24,11 @@ fn temp_dir(name: &str) -> tempfile::TempDir {
     common::temp_dir(name)
 }
 
-/// Helper: build a config with store support enabled.
-fn store_config(test_name: &str) -> EventBusConfig {
-    EventBusConfig::builder(format!("test/{test_name}"))
+/// Helper: build a config with store support enabled, scoped to the domain.
+fn store_config(domain: &mitiflow::MitiflowDomain) -> EventBusConfig {
+    domain
+        .event_bus_config("events")
+        .expect("valid topic")
         .cache_size(256)
         .heartbeat(HeartbeatMode::Periodic(Duration::from_millis(200)))
         .history_on_subscribe(false)
@@ -48,18 +50,20 @@ fn store_config(test_name: &str) -> EventBusConfig {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn subscriber_catches_up_from_store_then_receives_live() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = common::isolated_domain("history_catchup").await;
     let dir = temp_dir("history_catchup");
 
-    let config = store_config("history_catchup");
+    let config = store_config(&domain);
 
     // Start event store.
     let backend = FjallBackend::open(dir.path(), 0).unwrap();
-    let mut store = EventStore::new(&session, backend, config.clone());
+    let mut store = EventStore::new(domain.session(), backend, config.clone());
     store.run().await.unwrap();
 
     // Create publisher and send historical events.
-    let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let history_count = 10u64;
@@ -83,7 +87,7 @@ async fn subscriber_catches_up_from_store_then_receives_live() {
 
     // Now create a subscriber. It joins after history was published.
     // history_on_subscribe is false, so it won't auto-fetch.
-    let subscriber = EventSubscriber::new(&session, config.clone())
+    let subscriber = EventSubscriber::new(domain.session(), config.clone())
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -117,7 +121,7 @@ async fn subscriber_catches_up_from_store_then_receives_live() {
     store.shutdown();
     drop(publisher);
     drop(subscriber);
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -129,19 +133,21 @@ async fn subscriber_catches_up_from_store_then_receives_live() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn store_recovers_missed_events() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = common::isolated_domain("store_recovery").await;
     let dir = temp_dir("store_recovery");
 
-    let config = store_config("store_recovery");
+    let config = store_config(&domain);
 
     // Start event store.
     let backend = FjallBackend::open(dir.path(), 0).unwrap();
-    let mut store = EventStore::new(&session, backend, config.clone());
+    let mut store = EventStore::new(domain.session(), backend, config.clone());
     store.run().await.unwrap();
 
     // Create publisher + subscriber together.
-    let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
-    let subscriber = EventSubscriber::new(&session, config.clone())
+    let publisher = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
+    let subscriber = EventSubscriber::new(domain.session(), config.clone())
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -176,7 +182,7 @@ async fn store_recovers_missed_events() {
     store.shutdown();
     drop(publisher);
     drop(subscriber);
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -188,18 +194,22 @@ async fn store_recovers_missed_events() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cache_recovery_without_store() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = common::isolated_domain("cache_only_recovery").await;
 
     // Config without store
-    let config = EventBusConfig::builder("test/cache_only_recovery")
+    let config = domain
+        .event_bus_config("events")
+        .expect("valid topic")
         .cache_size(1000)
         .heartbeat(HeartbeatMode::Periodic(Duration::from_millis(200)))
         .history_on_subscribe(false)
         .build()
         .expect("valid config");
 
-    let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
-    let subscriber = EventSubscriber::new(&session, config.clone())
+    let publisher = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
+    let subscriber = EventSubscriber::new(domain.session(), config.clone())
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -230,7 +240,7 @@ async fn cache_recovery_without_store() {
 
     drop(publisher);
     drop(subscriber);
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -242,18 +252,22 @@ async fn cache_recovery_without_store() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn multiple_publishers_with_store_recovery() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = common::isolated_domain("multi_pub_recovery").await;
     let dir = temp_dir("multi_pub_recovery");
 
-    let config = store_config("multi_pub_recovery");
+    let config = store_config(&domain);
 
     let backend = FjallBackend::open(dir.path(), 0).unwrap();
-    let mut store = EventStore::new(&session, backend, config.clone());
+    let mut store = EventStore::new(domain.session(), backend, config.clone());
     store.run().await.unwrap();
 
-    let pub1 = EventPublisher::new(&session, config.clone()).await.unwrap();
-    let pub2 = EventPublisher::new(&session, config.clone()).await.unwrap();
-    let subscriber = EventSubscriber::new(&session, config.clone())
+    let pub1 = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
+    let pub2 = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
+    let subscriber = EventSubscriber::new(domain.session(), config.clone())
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -295,7 +309,7 @@ async fn multiple_publishers_with_store_recovery() {
     drop(pub1);
     drop(pub2);
     drop(subscriber);
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -306,17 +320,21 @@ async fn multiple_publishers_with_store_recovery() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn store_query_filters_by_publisher_id() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = common::isolated_domain("store_pub_filter").await;
     let dir = temp_dir("store_pub_filter");
 
-    let config = store_config("store_pub_filter");
+    let config = store_config(&domain);
 
     let backend = FjallBackend::open(dir.path(), 0).unwrap();
-    let mut store = EventStore::new(&session, backend, config.clone());
+    let mut store = EventStore::new(domain.session(), backend, config.clone());
     store.run().await.unwrap();
 
-    let pub1 = EventPublisher::new(&session, config.clone()).await.unwrap();
-    let pub2 = EventPublisher::new(&session, config.clone()).await.unwrap();
+    let pub1 = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
+    let pub2 = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let pub1_id = *pub1.publisher_id();
@@ -378,7 +396,7 @@ async fn store_query_filters_by_publisher_id() {
     store.shutdown();
     drop(pub1);
     drop(pub2);
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -389,10 +407,12 @@ async fn store_query_filters_by_publisher_id() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn recovery_with_zero_cache_store_only() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = common::isolated_domain("zero_cache").await;
     let dir = temp_dir("zero_cache");
 
-    let config = EventBusConfig::builder("test/zero_cache")
+    let config = domain
+        .event_bus_config("events")
+        .expect("valid topic")
         .cache_size(0)
         .heartbeat(HeartbeatMode::Periodic(Duration::from_millis(200)))
         .history_on_subscribe(false)
@@ -403,11 +423,13 @@ async fn recovery_with_zero_cache_store_only() {
         .expect("valid config");
 
     let backend = FjallBackend::open(dir.path(), 0).unwrap();
-    let mut store = EventStore::new(&session, backend, config.clone());
+    let mut store = EventStore::new(domain.session(), backend, config.clone());
     store.run().await.unwrap();
 
-    let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
-    let subscriber = EventSubscriber::new(&session, config.clone())
+    let publisher = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
+    let subscriber = EventSubscriber::new(domain.session(), config.clone())
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -439,7 +461,7 @@ async fn recovery_with_zero_cache_store_only() {
     store.shutdown();
     drop(publisher);
     drop(subscriber);
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -456,16 +478,18 @@ async fn recovery_with_zero_cache_store_only() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn late_subscriber_with_ongoing_publish() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = common::isolated_domain("late_sub").await;
     let dir = temp_dir("late_sub");
 
-    let config = store_config("late_sub");
+    let config = store_config(&domain);
 
     let backend = FjallBackend::open(dir.path(), 0).unwrap();
-    let mut store = EventStore::new(&session, backend, config.clone());
+    let mut store = EventStore::new(domain.session(), backend, config.clone());
     store.run().await.unwrap();
 
-    let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Phase 1: publish history (subscriber not yet created)
@@ -481,7 +505,7 @@ async fn late_subscriber_with_ongoing_publish() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Phase 2: subscriber joins late
-    let subscriber = EventSubscriber::new(&session, config.clone())
+    let subscriber = EventSubscriber::new(domain.session(), config.clone())
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -528,7 +552,7 @@ async fn late_subscriber_with_ongoing_publish() {
     store.shutdown();
     drop(publisher);
     drop(subscriber);
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 // ---------------------------------------------------------------------------
