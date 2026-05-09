@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use mitiflow::MitiflowDomain;
 use mitiflow::store::offset::OffsetCommit;
 use mitiflow::store::watermark::{CommitWatermark, PublisherWatermark};
 use mitiflow::types::PublisherId;
@@ -20,11 +21,6 @@ use mitiflow_orchestrator::override_manager::OverrideManager;
 use mitiflow_orchestrator::{
     NodeHealth, NodeStatus, OverrideEntry, OverrideTable, PartitionStatus, StoreState,
 };
-
-/// Unique key prefix per test to avoid cross-talk.
-fn key_prefix(test: &str) -> String {
-    format!("test/orch_{test}_{}", uuid::Uuid::now_v7())
-}
 
 // ==========================================================================
 // ConfigStore CRUD
@@ -159,10 +155,11 @@ fn config_store_persistence() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lag_monitor_computes_lag_from_watermarks_and_offsets() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let prefix = key_prefix("lag");
+    let domain = MitiflowDomain::isolated_for_test("orch_lag").await.unwrap();
+    let session = domain.session();
+    let prefix = domain.namespace().root().to_string();
 
-    let monitor = LagMonitor::new(&session, &prefix, Duration::from_millis(100))
+    let monitor = LagMonitor::new(session, &prefix, Duration::from_millis(100))
         .await
         .unwrap();
 
@@ -214,6 +211,7 @@ async fn lag_monitor_computes_lag_from_watermarks_and_offsets() {
     assert_eq!(*reports[0].publishers.get(&pub_id).unwrap(), 7);
 
     monitor.shutdown().await;
+    domain.shutdown().await.unwrap();
 }
 
 // ==========================================================================
@@ -222,10 +220,13 @@ async fn lag_monitor_computes_lag_from_watermarks_and_offsets() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn store_tracker_online_offline() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let prefix = key_prefix("tracker");
+    let domain = MitiflowDomain::isolated_for_test("orch_tracker")
+        .await
+        .unwrap();
+    let session = domain.session();
+    let prefix = domain.namespace().root().to_string();
 
-    let tracker = StoreTracker::new(&session, &prefix).await.unwrap();
+    let tracker = StoreTracker::new(session, &prefix).await.unwrap();
 
     // Initially no stores
     assert!(tracker.online_stores().await.is_empty());
@@ -258,6 +259,7 @@ async fn store_tracker_online_offline() {
     assert_eq!(offline[0].partition, 0);
 
     tracker.shutdown().await;
+    domain.shutdown().await.unwrap();
 }
 
 // ==========================================================================
@@ -266,9 +268,12 @@ async fn store_tracker_online_offline() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn orchestrator_create_list_delete_topic() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("orch_crud")
+        .await
+        .unwrap();
+    let session = domain.session();
     let dir = tempfile::tempdir().unwrap();
-    let prefix = key_prefix("orch_crud");
+    let prefix = domain.namespace().root().to_string();
 
     let config = OrchestratorConfig {
         key_prefix: prefix.clone(),
@@ -280,7 +285,7 @@ async fn orchestrator_create_list_delete_topic() {
         bootstrap_topics_from: None,
     };
 
-    let mut orch = Orchestrator::new(&session, config).unwrap();
+    let mut orch = Orchestrator::new(session, config).unwrap();
     orch.run().await.unwrap();
 
     // Create topics
@@ -330,13 +335,17 @@ async fn orchestrator_create_list_delete_topic() {
     assert!(orch.get_topic("events").unwrap().is_none());
 
     orch.shutdown().await;
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn orchestrator_admin_queryable_topics() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("orch_admin")
+        .await
+        .unwrap();
+    let session = domain.session();
     let dir = tempfile::tempdir().unwrap();
-    let prefix = key_prefix("orch_admin");
+    let prefix = domain.namespace().root().to_string();
     let admin = format!("{prefix}/_admin");
 
     let config = OrchestratorConfig {
@@ -349,7 +358,7 @@ async fn orchestrator_admin_queryable_topics() {
         bootstrap_topics_from: None,
     };
 
-    let mut orch = Orchestrator::new(&session, config).unwrap();
+    let mut orch = Orchestrator::new(session, config).unwrap();
     orch.run().await.unwrap();
 
     // Create a topic via the orchestrator API
@@ -406,13 +415,17 @@ async fn orchestrator_admin_queryable_topics() {
     );
 
     orch.shutdown().await;
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn orchestrator_lag_integration() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("orch_lag_int")
+        .await
+        .unwrap();
+    let session = domain.session();
     let dir = tempfile::tempdir().unwrap();
-    let prefix = key_prefix("orch_lag");
+    let prefix = domain.namespace().root().to_string();
 
     let config = OrchestratorConfig {
         key_prefix: prefix.clone(),
@@ -424,7 +437,7 @@ async fn orchestrator_lag_integration() {
         bootstrap_topics_from: None,
     };
 
-    let mut orch = Orchestrator::new(&session, config).unwrap();
+    let mut orch = Orchestrator::new(session, config).unwrap();
     orch.run().await.unwrap();
 
     let pub_id = PublisherId::new();
@@ -476,6 +489,7 @@ async fn orchestrator_lag_integration() {
     assert_eq!(reports[0].total, 30); // 50 - 20
 
     orch.shutdown().await;
+    domain.shutdown().await.unwrap();
 }
 
 // ==========================================================================
@@ -484,10 +498,11 @@ async fn orchestrator_lag_integration() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cluster_view_empty_on_start() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let prefix = key_prefix("cv_empty");
+    let domain = MitiflowDomain::isolated_for_test("cv_empty").await.unwrap();
+    let session = domain.session();
+    let prefix = domain.namespace().root().to_string();
 
-    let cv = ClusterView::new(&session, &prefix).await.unwrap();
+    let cv = ClusterView::new(session, &prefix).await.unwrap();
 
     assert!(cv.nodes().await.is_empty());
     assert!(cv.assignments().await.is_empty());
@@ -495,14 +510,18 @@ async fn cluster_view_empty_on_start() {
     assert_eq!(cv.online_count().await, 0);
 
     cv.shutdown().await;
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cluster_view_picks_up_status_updates() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let prefix = key_prefix("cv_status");
+    let domain = MitiflowDomain::isolated_for_test("cv_status")
+        .await
+        .unwrap();
+    let session = domain.session();
+    let prefix = domain.namespace().root().to_string();
 
-    let cv = ClusterView::new(&session, &prefix).await.unwrap();
+    let cv = ClusterView::new(session, &prefix).await.unwrap();
 
     // Publish a status update as if from an agent
     let status = NodeStatus {
@@ -549,14 +568,18 @@ async fn cluster_view_picks_up_status_updates() {
     assert_eq!(assignments[&(0, 0)].state, StoreState::Active);
 
     cv.shutdown().await;
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cluster_view_picks_up_health_updates() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let prefix = key_prefix("cv_health");
+    let domain = MitiflowDomain::isolated_for_test("cv_health")
+        .await
+        .unwrap();
+    let session = domain.session();
+    let prefix = domain.namespace().root().to_string();
 
-    let cv = ClusterView::new(&session, &prefix).await.unwrap();
+    let cv = ClusterView::new(session, &prefix).await.unwrap();
 
     let health = NodeHealth {
         node_id: "node-2".into(),
@@ -583,14 +606,16 @@ async fn cluster_view_picks_up_health_updates() {
     assert_eq!(info.health.as_ref().unwrap().events_stored, 1000);
 
     cv.shutdown().await;
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cluster_view_marks_node_offline_on_liveliness_drop() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let prefix = key_prefix("cv_live");
+    let domain = MitiflowDomain::isolated_for_test("cv_live").await.unwrap();
+    let session = domain.session();
+    let prefix = domain.namespace().root().to_string();
 
-    let cv = ClusterView::new(&session, &prefix).await.unwrap();
+    let cv = ClusterView::new(session, &prefix).await.unwrap();
 
     // Declare a liveliness token simulating an agent
     let token = session
@@ -612,14 +637,18 @@ async fn cluster_view_marks_node_offline_on_liveliness_drop() {
     assert_eq!(cv.online_count().await, 0);
 
     cv.shutdown().await;
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cluster_view_online_nodes_filtered() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let prefix = key_prefix("cv_filter");
+    let domain = MitiflowDomain::isolated_for_test("cv_filter")
+        .await
+        .unwrap();
+    let session = domain.session();
+    let prefix = domain.namespace().root().to_string();
 
-    let cv = ClusterView::new(&session, &prefix).await.unwrap();
+    let cv = ClusterView::new(session, &prefix).await.unwrap();
 
     // Two nodes come online
     let _t1 = session
@@ -645,14 +674,18 @@ async fn cluster_view_online_nodes_filtered() {
     assert!(online.contains(&"alive-1".to_string()));
 
     cv.shutdown().await;
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cluster_view_deriving_assignments_multi_node() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let prefix = key_prefix("cv_assign");
+    let domain = MitiflowDomain::isolated_for_test("cv_assign")
+        .await
+        .unwrap();
+    let session = domain.session();
+    let prefix = domain.namespace().root().to_string();
 
-    let cv = ClusterView::new(&session, &prefix).await.unwrap();
+    let cv = ClusterView::new(session, &prefix).await.unwrap();
 
     // Two agents publish their status
     for (node, partitions) in [
@@ -690,6 +723,7 @@ async fn cluster_view_deriving_assignments_multi_node() {
     assert_eq!(assignments[&(2, 0)].node_id, "agent-b");
 
     cv.shutdown().await;
+    domain.shutdown().await.unwrap();
 }
 
 // ==========================================================================
@@ -698,26 +732,31 @@ async fn cluster_view_deriving_assignments_multi_node() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn override_manager_starts_empty() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let prefix = key_prefix("om_empty");
+    let domain = MitiflowDomain::isolated_for_test("om_empty").await.unwrap();
+    let session = domain.session();
+    let prefix = domain.namespace().root().to_string();
 
-    let om = OverrideManager::new(&session, &prefix);
+    let om = OverrideManager::new(session, &prefix);
 
     let current = om.current().await;
     assert!(current.entries.is_empty());
     assert_eq!(current.epoch, 0);
+
+    drop(om);
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn override_manager_publishes_and_subscriber_receives() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let prefix = key_prefix("om_pub");
+    let domain = MitiflowDomain::isolated_for_test("om_pub").await.unwrap();
+    let session = domain.session();
+    let prefix = domain.namespace().root().to_string();
     let overrides_key = format!("{prefix}/_cluster/overrides");
 
     // Subscribe before publishing
     let sub = session.declare_subscriber(&overrides_key).await.unwrap();
 
-    let om = OverrideManager::new(&session, &prefix);
+    let om = OverrideManager::new(session, &prefix);
 
     om.publish_entries(
         vec![OverrideEntry {
@@ -741,14 +780,19 @@ async fn override_manager_publishes_and_subscriber_receives() {
     assert_eq!(table.entries.len(), 1);
     assert_eq!(table.entries[0].node_id, "node-99");
     assert_eq!(table.epoch, 1);
+
+    drop(sub);
+    drop(om);
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn override_manager_epoch_increments() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let prefix = key_prefix("om_epoch");
+    let domain = MitiflowDomain::isolated_for_test("om_epoch").await.unwrap();
+    let session = domain.session();
+    let prefix = domain.namespace().root().to_string();
 
-    let om = OverrideManager::new(&session, &prefix);
+    let om = OverrideManager::new(session, &prefix);
 
     om.publish_entries(vec![], None).await.unwrap();
     assert_eq!(om.current().await.epoch, 1);
@@ -758,14 +802,18 @@ async fn override_manager_epoch_increments() {
 
     om.publish_entries(vec![], None).await.unwrap();
     assert_eq!(om.current().await.epoch, 3);
+
+    drop(om);
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn override_manager_clear_sends_empty_table() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let prefix = key_prefix("om_clear");
+    let domain = MitiflowDomain::isolated_for_test("om_clear").await.unwrap();
+    let session = domain.session();
+    let prefix = domain.namespace().root().to_string();
 
-    let om = OverrideManager::new(&session, &prefix);
+    let om = OverrideManager::new(session, &prefix);
 
     // Publish entries
     om.publish_entries(
@@ -786,14 +834,20 @@ async fn override_manager_clear_sends_empty_table() {
     let current = om.current().await;
     assert!(current.entries.is_empty());
     assert_eq!(current.epoch, 2); // epoch still incremented
+
+    drop(om);
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn override_manager_remove_entries_for_node() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let prefix = key_prefix("om_remove");
+    let domain = MitiflowDomain::isolated_for_test("om_remove")
+        .await
+        .unwrap();
+    let session = domain.session();
+    let prefix = domain.namespace().root().to_string();
 
-    let om = OverrideManager::new(&session, &prefix);
+    let om = OverrideManager::new(session, &prefix);
 
     om.publish_entries(
         vec![
@@ -826,14 +880,18 @@ async fn override_manager_remove_entries_for_node() {
     let current = om.current().await;
     assert_eq!(current.entries.len(), 1);
     assert_eq!(current.entries[0].node_id, "keep-me");
+
+    drop(om);
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn override_manager_add_entries_merges() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let prefix = key_prefix("om_merge");
+    let domain = MitiflowDomain::isolated_for_test("om_merge").await.unwrap();
+    let session = domain.session();
+    let prefix = domain.namespace().root().to_string();
 
-    let om = OverrideManager::new(&session, &prefix);
+    let om = OverrideManager::new(session, &prefix);
 
     // Initial entries
     om.publish_entries(
@@ -874,6 +932,9 @@ async fn override_manager_add_entries_merges() {
     // (0,0) should be updated to new-target
     let entry_0 = current.entries.iter().find(|e| e.partition == 0).unwrap();
     assert_eq!(entry_0.node_id, "new-target");
+
+    drop(om);
+    domain.shutdown().await.unwrap();
 }
 
 // ==========================================================================
@@ -884,11 +945,14 @@ async fn override_manager_add_entries_merges() {
 async fn drain_node_publishes_correct_overrides() {
     use mitiflow_orchestrator::drain;
 
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let prefix = key_prefix("drain_pub");
+    let domain = MitiflowDomain::isolated_for_test("drain_pub")
+        .await
+        .unwrap();
+    let session = domain.session();
+    let prefix = domain.namespace().root().to_string();
 
-    let cv = ClusterView::new(&session, &prefix).await.unwrap();
-    let om = OverrideManager::new(&session, &prefix);
+    let cv = ClusterView::new(session, &prefix).await.unwrap();
+    let om = OverrideManager::new(session, &prefix);
 
     // Simulate 3 online agents
     let _t0 = session
@@ -955,17 +1019,20 @@ async fn drain_node_publishes_correct_overrides() {
     assert_eq!(current.entries.len(), 2);
 
     cv.shutdown().await;
+    drop(om);
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn undrain_node_removes_overrides() {
     use mitiflow_orchestrator::drain;
 
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let prefix = key_prefix("undrain");
+    let domain = MitiflowDomain::isolated_for_test("undrain").await.unwrap();
+    let session = domain.session();
+    let prefix = domain.namespace().root().to_string();
 
-    let cv = ClusterView::new(&session, &prefix).await.unwrap();
-    let om = OverrideManager::new(&session, &prefix);
+    let cv = ClusterView::new(session, &prefix).await.unwrap();
+    let om = OverrideManager::new(session, &prefix);
 
     // Simulate nodes and status
     let _t0 = session
@@ -1008,6 +1075,8 @@ async fn undrain_node_removes_overrides() {
     assert!(om.current().await.entries.is_empty());
 
     cv.shutdown().await;
+    drop(om);
+    domain.shutdown().await.unwrap();
 }
 
 // ==========================================================================
@@ -1016,9 +1085,10 @@ async fn undrain_node_removes_overrides() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_cluster_nodes_endpoint() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("admin_cn").await.unwrap();
+    let session = domain.session();
     let dir = tempfile::tempdir().unwrap();
-    let prefix = key_prefix("admin_cn");
+    let prefix = domain.namespace().root().to_string();
     let admin = format!("{prefix}/_admin");
 
     let config = OrchestratorConfig {
@@ -1031,7 +1101,7 @@ async fn admin_cluster_nodes_endpoint() {
         bootstrap_topics_from: None,
     };
 
-    let mut orch = Orchestrator::new(&session, config).unwrap();
+    let mut orch = Orchestrator::new(session, config).unwrap();
     orch.run().await.unwrap();
 
     // Simulate agent liveliness + status
@@ -1075,13 +1145,15 @@ async fn admin_cluster_nodes_endpoint() {
     assert!(found, "should have received a reply from cluster/nodes");
 
     orch.shutdown().await;
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_cluster_assignments_endpoint() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("admin_ca").await.unwrap();
+    let session = domain.session();
     let dir = tempfile::tempdir().unwrap();
-    let prefix = key_prefix("admin_ca");
+    let prefix = domain.namespace().root().to_string();
     let admin = format!("{prefix}/_admin");
 
     let config = OrchestratorConfig {
@@ -1094,7 +1166,7 @@ async fn admin_cluster_assignments_endpoint() {
         bootstrap_topics_from: None,
     };
 
-    let mut orch = Orchestrator::new(&session, config).unwrap();
+    let mut orch = Orchestrator::new(session, config).unwrap();
     orch.run().await.unwrap();
 
     // Simulate agent with 2 partitions
@@ -1144,13 +1216,15 @@ async fn admin_cluster_assignments_endpoint() {
     assert!(found, "should have received reply from cluster/assignments");
 
     orch.shutdown().await;
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_cluster_status_summary() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("admin_cs").await.unwrap();
+    let session = domain.session();
     let dir = tempfile::tempdir().unwrap();
-    let prefix = key_prefix("admin_cs");
+    let prefix = domain.namespace().root().to_string();
     let admin = format!("{prefix}/_admin");
 
     let config = OrchestratorConfig {
@@ -1163,7 +1237,7 @@ async fn admin_cluster_status_summary() {
         bootstrap_topics_from: None,
     };
 
-    let mut orch = Orchestrator::new(&session, config).unwrap();
+    let mut orch = Orchestrator::new(session, config).unwrap();
     orch.run().await.unwrap();
 
     // Simulate 2 online agents
@@ -1219,6 +1293,7 @@ async fn admin_cluster_status_summary() {
     assert!(found, "should have received reply from cluster/status");
 
     orch.shutdown().await;
+    domain.shutdown().await.unwrap();
 }
 
 // ==========================================================================
@@ -1227,9 +1302,12 @@ async fn admin_cluster_status_summary() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn multi_topic_cluster_view_created_on_topic_create() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("mt_create")
+        .await
+        .unwrap();
+    let session = domain.session();
     let dir = tempfile::tempdir().unwrap();
-    let prefix = key_prefix("mt_create");
+    let prefix = domain.namespace().root().to_string();
 
     let config = OrchestratorConfig {
         key_prefix: prefix.clone(),
@@ -1241,7 +1319,7 @@ async fn multi_topic_cluster_view_created_on_topic_create() {
         bootstrap_topics_from: None,
     };
 
-    let mut orch = Orchestrator::new(&session, config).unwrap();
+    let mut orch = Orchestrator::new(session, config).unwrap();
     orch.run().await.unwrap();
 
     // No per-topic views initially
@@ -1297,13 +1375,17 @@ async fn multi_topic_cluster_view_created_on_topic_create() {
     drop(tm);
 
     orch.shutdown().await;
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn multi_topic_cluster_view_removed_on_topic_delete() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("mt_delete")
+        .await
+        .unwrap();
+    let session = domain.session();
     let dir = tempfile::tempdir().unwrap();
-    let prefix = key_prefix("mt_delete");
+    let prefix = domain.namespace().root().to_string();
 
     let config = OrchestratorConfig {
         key_prefix: prefix.clone(),
@@ -1315,7 +1397,7 @@ async fn multi_topic_cluster_view_removed_on_topic_delete() {
         bootstrap_topics_from: None,
     };
 
-    let mut orch = Orchestrator::new(&session, config).unwrap();
+    let mut orch = Orchestrator::new(session, config).unwrap();
     orch.run().await.unwrap();
 
     // Create topic with prefix
@@ -1364,13 +1446,15 @@ async fn multi_topic_cluster_view_removed_on_topic_delete() {
     );
 
     orch.shutdown().await;
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn multi_topic_views_pick_up_independent_agents() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("mt_indep").await.unwrap();
+    let session = domain.session();
     let dir = tempfile::tempdir().unwrap();
-    let prefix = key_prefix("mt_indep");
+    let prefix = domain.namespace().root().to_string();
 
     let config = OrchestratorConfig {
         key_prefix: prefix.clone(),
@@ -1382,7 +1466,7 @@ async fn multi_topic_views_pick_up_independent_agents() {
         bootstrap_topics_from: None,
     };
 
-    let mut orch = Orchestrator::new(&session, config).unwrap();
+    let mut orch = Orchestrator::new(session, config).unwrap();
     orch.run().await.unwrap();
 
     // Create two topics with different prefixes
@@ -1443,6 +1527,7 @@ async fn multi_topic_views_pick_up_independent_agents() {
     drop(tm);
 
     orch.shutdown().await;
+    domain.shutdown().await.unwrap();
 }
 
 // ==========================================================================
@@ -1451,9 +1536,12 @@ async fn multi_topic_views_pick_up_independent_agents() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn orchestrator_config_queryable_returns_all_topics() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("cfg_qbl_all")
+        .await
+        .unwrap();
+    let session = domain.session();
     let dir = tempfile::tempdir().unwrap();
-    let prefix = key_prefix("cfg_qbl_all");
+    let prefix = domain.namespace().root().to_string();
 
     let config = OrchestratorConfig {
         key_prefix: prefix.clone(),
@@ -1465,7 +1553,7 @@ async fn orchestrator_config_queryable_returns_all_topics() {
         bootstrap_topics_from: None,
     };
 
-    let mut orch = Orchestrator::new(&session, config).unwrap();
+    let mut orch = Orchestrator::new(session, config).unwrap();
     orch.run().await.unwrap();
 
     // Create two topics.
@@ -1525,13 +1613,17 @@ async fn orchestrator_config_queryable_returns_all_topics() {
     assert_eq!(topic_names, vec!["alpha", "beta"]);
 
     orch.shutdown().await;
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn orchestrator_config_queryable_returns_single_topic() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("cfg_qbl_single")
+        .await
+        .unwrap();
+    let session = domain.session();
     let dir = tempfile::tempdir().unwrap();
-    let prefix = key_prefix("cfg_qbl_single");
+    let prefix = domain.namespace().root().to_string();
 
     let config = OrchestratorConfig {
         key_prefix: prefix.clone(),
@@ -1543,7 +1635,7 @@ async fn orchestrator_config_queryable_returns_single_topic() {
         bootstrap_topics_from: None,
     };
 
-    let mut orch = Orchestrator::new(&session, config).unwrap();
+    let mut orch = Orchestrator::new(session, config).unwrap();
     orch.run().await.unwrap();
 
     orch.create_topic(TopicConfig {
@@ -1588,6 +1680,7 @@ async fn orchestrator_config_queryable_returns_single_topic() {
     assert!(found, "should receive 'orders' topic config");
 
     orch.shutdown().await;
+    domain.shutdown().await.unwrap();
 }
 
 #[test]
