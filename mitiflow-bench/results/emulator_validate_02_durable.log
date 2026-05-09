@@ -1,0 +1,3 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.15s
+     Running `target/debug/mitiflow-emulator validate mitiflow-emulator/topologies/02_durable.yaml`
+Topology is valid.

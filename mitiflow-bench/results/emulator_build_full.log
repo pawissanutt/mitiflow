@@ -1,0 +1,10 @@
+   Compiling zenoh-link-unixsock_stream v1.9.0
+   Compiling lightbench v0.3.2
+   Compiling zenoh-link v1.9.0
+   Compiling zenoh-transport v1.9.0
+   Compiling zenoh v1.9.0
+   Compiling mitiflow v0.1.0 (/home/pawis/mitiflow/mitiflow)
+   Compiling mitiflow-storage v0.1.0 (/home/pawis/mitiflow/mitiflow-storage)
+   Compiling mitiflow-orchestrator v0.1.0 (/home/pawis/mitiflow/mitiflow-orchestrator)
+   Compiling mitiflow-emulator v0.1.0 (/home/pawis/mitiflow/mitiflow-emulator)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 39.87s

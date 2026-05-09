@@ -1,0 +1,35 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.15s
+     Running `target/debug/mitiflow-emulator run mitiflow-emulator/topologies/01_minimal.yaml --duration 5`
+[2m2026-05-09T05:34:34.544429Z[0m [33m WARN[0m [2mmitiflow_emulator::supervisor[0m[2m:[0m warning: topic "events" has no storage_agent — events will not be persisted
+[2m2026-05-09T05:34:34.544640Z[0m [32m INFO[0m [2mmitiflow_emulator::supervisor[0m[2m:[0m Spawning prod-1:0 (mitiflow-emulator-producer)
+[2m2026-05-09T05:34:34.545425Z[0m [32m INFO[0m [2mmitiflow_emulator::supervisor[0m[2m:[0m Spawning cons-1:0 (mitiflow-emulator-consumer)
+[prod-1:0] [2m2026-05-09T05:34:34.552626Z[0m [32m INFO[0m [2mzenoh::net::runtime[0m[2m:[0m Using ZID: f1e2df965888ff8c10b48632dccbe7d6
+[cons-1:0] [2m2026-05-09T05:34:34.552975Z[0m [32m INFO[0m [2mzenoh::net::runtime[0m[2m:[0m Using ZID: 2a2d97f0ebbc061df68498a3ebc30932
+[prod-1:0] [2m2026-05-09T05:34:34.554942Z[0m [32m INFO[0m [2mzenoh::net::runtime::orchestrator[0m[2m:[0m Zenoh can be reached at: tcp/[fe80::215:5dff:feb3:d38f]:36967
+[prod-1:0] [2m2026-05-09T05:34:34.555007Z[0m [32m INFO[0m [2mzenoh::net::runtime::orchestrator[0m[2m:[0m Zenoh can be reached at: tcp/10.255.255.254:36967
+[prod-1:0] [2m2026-05-09T05:34:34.555021Z[0m [32m INFO[0m [2mzenoh::net::runtime::orchestrator[0m[2m:[0m Zenoh can be reached at: tcp/172.26.109.129:36967
+[prod-1:0] [2m2026-05-09T05:34:34.555138Z[0m [32m INFO[0m [2mzenoh::net::runtime::orchestrator[0m[2m:[0m Listening scout messages on 224.0.0.224:7446
+[cons-1:0] [2m2026-05-09T05:34:34.555192Z[0m [32m INFO[0m [2mzenoh::net::runtime::orchestrator[0m[2m:[0m Zenoh can be reached at: tcp/[fe80::215:5dff:feb3:d38f]:41005
+[cons-1:0] [2m2026-05-09T05:34:34.555227Z[0m [32m INFO[0m [2mzenoh::net::runtime::orchestrator[0m[2m:[0m Zenoh can be reached at: tcp/10.255.255.254:41005
+[cons-1:0] [2m2026-05-09T05:34:34.555232Z[0m [32m INFO[0m [2mzenoh::net::runtime::orchestrator[0m[2m:[0m Zenoh can be reached at: tcp/172.26.109.129:41005
+[cons-1:0] [2m2026-05-09T05:34:34.555310Z[0m [32m INFO[0m [2mzenoh::net::runtime::orchestrator[0m[2m:[0m Listening scout messages on 224.0.0.224:7446
+[prod-1:0] [2m2026-05-09T05:34:34.560869Z[0m [32m INFO[0m [2mmitiflow_emulator_producer[0m[2m:[0m Producer started: prefix=demo/events, rate=Some(100.0), ramp_up=None, burst=None
+[prod-1:0] [2m2026-05-09T05:34:34.561154Z[0m [32m INFO[0m [2mlightbench::patterns::request[0m[2m:[0m Benchmark: 1 workers, 100.0 req/s (shared), 86400s duration
+[cons-1:0] [2m2026-05-09T05:34:34.561578Z[0m [32m INFO[0m [2mmitiflow_emulator_consumer[0m[2m:[0m Consumer started: prefix=demo/events
+[cons-1:0] [2m2026-05-09T05:34:34.562241Z[0m [32m INFO[0m [2mmitiflow_emulator_consumer[0m[2m:[0m Consumer rate: 0 eps (total: 0)
+[prod-1:0] [2m2026-05-09T05:34:34.562403Z[0m [32m INFO[0m [2mmitiflow_emulator_producer[0m[2m:[0m Producer rate: 0 eps (total: 0)
+[cons-1:0] [2m2026-05-09T05:34:35.562037Z[0m [32m INFO[0m [2mmitiflow_emulator_consumer[0m[2m:[0m Consumer rate: 90 eps (total: 90)
+[prod-1:0] [2m2026-05-09T05:34:36.561592Z[0m [32m INFO[0m [2mmitiflow_emulator_producer[0m[2m:[0m Producer rate: 95 eps (total: 190)
+[cons-1:0] [2m2026-05-09T05:34:36.562682Z[0m [32m INFO[0m [2mmitiflow_emulator_consumer[0m[2m:[0m Consumer rate: 100 eps (total: 190)
+[cons-1:0] [2m2026-05-09T05:34:37.561886Z[0m [32m INFO[0m [2mmitiflow_emulator_consumer[0m[2m:[0m Consumer rate: 101 eps (total: 291)
+[prod-1:0] [2m2026-05-09T05:34:38.561855Z[0m [32m INFO[0m [2mmitiflow_emulator_producer[0m[2m:[0m Producer rate: 100 eps (total: 390)
+[cons-1:0] [2m2026-05-09T05:34:38.561826Z[0m [32m INFO[0m [2mmitiflow_emulator_consumer[0m[2m:[0m Consumer rate: 100 eps (total: 391)
+[2m2026-05-09T05:34:38.741935Z[0m [32m INFO[0m [2mmitiflow_emulator::supervisor[0m[2m:[0m Duration elapsed (5s), shutting down...
+[2m2026-05-09T05:34:38.742018Z[0m [32m INFO[0m [2mmitiflow_emulator::supervisor[0m[2m:[0m Starting graceful shutdown...
+[2m2026-05-09T05:34:38.742039Z[0m [32m INFO[0m [2mmitiflow_emulator::supervisor[0m[2m:[0m Stopping cons-1 (1 instances)...
+[cons-1:0] [2m2026-05-09T05:34:38.743059Z[0m [32m INFO[0m [2mmitiflow_emulator_consumer[0m[2m:[0m Consumer shutting down. Total events: 490
+[cons-1:0] [2m2026-05-09T05:34:38.743198Z[0m [32m INFO[0m [2mzenoh::api::session[0m[2m:[0m close session [3mzid[0m[2m=[0m2a2d97f0ebbc061df68498a3ebc30932
+[2m2026-05-09T05:34:39.243732Z[0m [32m INFO[0m [2mmitiflow_emulator::supervisor[0m[2m:[0m Stopping prod-1 (1 instances)...
+[prod-1:0] [2m2026-05-09T05:34:39.244123Z[0m [32m INFO[0m [2mmitiflow_emulator_producer[0m[2m:[0m Producer shutting down
+[prod-1:0] [2m2026-05-09T05:34:39.244281Z[0m [32m INFO[0m [2mzenoh::api::session[0m[2m:[0m close session [3mzid[0m[2m=[0mf1e2df965888ff8c10b48632dccbe7d6
+[2m2026-05-09T05:34:39.745755Z[0m [32m INFO[0m [2mmitiflow_emulator::supervisor[0m[2m:[0m All components stopped.

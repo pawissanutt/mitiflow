@@ -1,0 +1,11 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.15s
+     Running `target/debug/mitiflow-emulator run mitiflow-emulator/topologies/01_minimal.yaml --dry-run`
+[2m2026-05-09T05:34:34.335475Z[0m [33m WARN[0m [2mmitiflow_emulator::supervisor[0m[2m:[0m warning: topic "events" has no storage_agent — events will not be persisted
+=== Dry Run — Spawn Plan ===
+
+Tier 3 — Producers:
+  prod-1 (kind=Producer, instances=1, topic=events)
+
+Tier 5 — Consumers:
+  cons-1 (kind=Consumer, instances=1, topic=events)
+

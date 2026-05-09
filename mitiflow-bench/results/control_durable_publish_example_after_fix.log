@@ -1,0 +1,25 @@
+   Compiling mitiflow v0.1.0 (/home/pawis/mitiflow/mitiflow)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.27s
+     Running `target/debug/examples/durable_publish`
+[2m2026-05-09T05:37:47.225527Z[0m [32m INFO[0m [2mmitiflow::domain::domain[0m[2m:[0m MitiflowDomain opened domain_id=examples-durable-publish namespace.root=mitiflow/examples-durable-publish transport.profile=LocalIsolated listen.endpoints=[tcp/127.0.0.1:35253] connect.endpoints=[] scouting.multicast=false scouting.gossip=false [3mdomain_id[0m[2m=[0mexamples-durable-publish [3mnamespace.root[0m[2m=[0mmitiflow/examples-durable-publish [3mtransport.profile[0m[2m=[0mLocalIsolated [3mlisten.endpoints[0m[2m=[0m[tcp/127.0.0.1:35253] [3mconnect.endpoints[0m[2m=[0m[] [3mscouting.multicast[0m[2m=[0mfalse [3mscouting.gossip[0m[2m=[0mfalse
+[2m2026-05-09T05:37:47.400114Z[0m [34mDEBUG[0m [2mmitiflow::store::runner[0m[2m:[0m backend worker started [3mworker_id[0m[2m=[0m0
+EventStore running at "/tmp/.tmph1lYQW"
+Durably published order ORD-0000 (seq=0, id=019e0b3d-eaf3-7d81-ba1f-249a10356f6f)
+Durably published order ORD-0001 (seq=1, id=019e0b3d-eb5a-7d81-ba1f-24abbc049f5e)
+Durably published order ORD-0002 (seq=2, id=019e0b3d-ebc0-7d81-ba1f-24bb287b9b14)
+Durably published order ORD-0003 (seq=3, id=019e0b3d-ebc0-7d81-ba1f-24cdc6d1e1f2)
+Durably published order ORD-0004 (seq=4, id=019e0b3d-ebc0-7d81-ba1f-24d73d66899e)
+
+All orders durably committed!
+Store contains 5 events
+[2m2026-05-09T05:37:47.277446Z[0m [34mDEBUG[0m [2mmitiflow::publisher[0m[2m:[0m cache queryable task stopped
+[2m2026-05-09T05:37:47.277565Z[0m [34mDEBUG[0m [2mmitiflow::publisher[0m[2m:[0m watermark listener task stopped
+[2m2026-05-09T05:37:47.277593Z[0m [34mDEBUG[0m [2mmitiflow::store::runner[0m[2m:[0m backend worker stopped [3mworker_id[0m[2m=[0m0
+[2m2026-05-09T05:37:47.277613Z[0m [34mDEBUG[0m [2mmitiflow::store::runner[0m[2m:[0m store queryable task stopped
+[2m2026-05-09T05:37:47.277586Z[0m [34mDEBUG[0m [2mmitiflow::publisher[0m[2m:[0m heartbeat task stopped for 019e0b3d-e988-7d81-ba1f-248c67459fb9
+[2m2026-05-09T05:37:47.277775Z[0m [34mDEBUG[0m [2mmitiflow::store::runner[0m[2m:[0m store replay offset task stopped
+[2m2026-05-09T05:37:47.277799Z[0m [34mDEBUG[0m [2mmitiflow::store::runner[0m[2m:[0m store keyed offset task stopped
+[2m2026-05-09T05:37:47.277864Z[0m [34mDEBUG[0m [2mmitiflow::store::runner[0m[2m:[0m store gc task stopped
+[2m2026-05-09T05:37:47.277890Z[0m [34mDEBUG[0m [2mmitiflow::store::runner[0m[2m:[0m store watermark task stopped
+[2m2026-05-09T05:37:47.278302Z[0m [34mDEBUG[0m [2mmitiflow::store::runner[0m[2m:[0m store offset task stopped
+[2m2026-05-09T05:37:47.278370Z[0m [34mDEBUG[0m [2mmitiflow::store::runner[0m[2m:[0m store subscribe task stopped

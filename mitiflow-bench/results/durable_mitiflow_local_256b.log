@@ -1,0 +1,43 @@
+   Compiling mitiflow-bench v0.1.0 (/home/pawis/mitiflow/mitiflow-bench)
+    Finished `release` profile [optimized] target(s) in 4.62s
+     Running `target/release/bench_durable --transport mitiflow --rate 1000 --workers 1 --duration 10 --payload-size 256 --csv mitiflow-bench/results/durable_mitiflow_local_256b.csv`
+2026-05-09T05:32:22.225401Z  INFO zenoh::net::runtime: Using ZID: f586bac45bd52133c566ce8e1446998a
+2026-05-09T05:32:22.226196Z  INFO zenoh::net::runtime::orchestrator: Zenoh can be reached at: tcp/[fe80::215:5dff:feb3:d38f]:44175
+2026-05-09T05:32:22.226224Z  INFO zenoh::net::runtime::orchestrator: Zenoh can be reached at: tcp/10.255.255.254:44175
+2026-05-09T05:32:22.226227Z  INFO zenoh::net::runtime::orchestrator: Zenoh can be reached at: tcp/172.26.109.129:44175
+2026-05-09T05:32:22.226320Z  INFO zenoh::net::runtime::orchestrator: Listening scout messages on 224.0.0.224:7446
+2026-05-09T05:32:22.728643Z  INFO fjall::db: Creating database at /tmp/mitiflow-bench-store-1205398
+2026-05-09T05:32:22.773479Z  INFO lsm_tree::tree::ingest: Finished ingestion writer
+2026-05-09T05:32:22.804691Z  INFO lsm_tree::tree::ingest: Finished ingestion writer
+2026-05-09T05:32:22.826665Z  INFO lsm_tree::tree::ingest: Finished ingestion writer
+2026-05-09T05:32:22.861144Z  INFO lsm_tree::tree::ingest: Finished ingestion writer
+2026-05-09T05:32:22.883006Z  INFO lsm_tree::tree::ingest: Finished ingestion writer
+2026-05-09T05:32:23.104728Z  INFO lightbench::patterns::request: Benchmark: 1 workers, 1000.0 req/s (shared), 10s duration
+[   0.000s]   0 req | curr 10 req/s | total 824 req/s | p50=0.00ms | 0% ok
+[   1.000s]   0 req | curr 1 req/s | total 2 req/s | p50=0.00ms | 0% ok
+[   1.999s]   0 req | curr 1 req/s | total 1 req/s | p50=0.00ms | 0% ok
+[   3.000s]   0 req | curr 1 req/s | total 1 req/s | p50=0.00ms | 0% ok
+[   4.000s]   0 req | curr 1 req/s | total 1 req/s | p50=0.00ms | 0% ok
+[   5.000s]   0 req | curr 1 req/s | total 1 req/s | p50=0.00ms | 0% ok
+[   6.000s]   0 req | curr 1 req/s | total 1 req/s | p50=0.00ms | 0% ok
+[   7.000s]   0 req | curr 1 req/s | total 1 req/s | p50=0.00ms | 0% ok
+[   8.000s]   0 req | curr 1 req/s | total 1 req/s | p50=0.00ms | 0% ok
+[   9.000s]   0 req | curr 1 req/s | total 1 req/s | p50=0.00ms | 0% ok
+2026-05-09T05:32:33.207333Z  INFO lightbench::patterns::request: Shutting down...
+[  10.000s]   0 req | curr 1 req/s | total 1 req/s | p50=0.00ms | 0% ok
+
+BENCHMARK RESULTS
+  Duration: 10.0s | Workers: 1 | Target: 1000 req/s
+
+  Request
+    Throughput:  3472.16 ops/s
+    Operations:  11 total, 1 ok, 10 errors (9.1% success)
+  Errors:
+    durability timeout: watermark did not cover seq 0: 10
+    Latency (ms):
+      min=2.583  p50=2.585  p95=2.585  p99=2.585  max=2.585
+      mean=2.584  stddev=0.000
+
+  CSV: mitiflow-bench/results/durable_mitiflow_local_256b.csv
+
+2026-05-09T05:32:33.228683Z  INFO zenoh::api::session: close session zid=f586bac45bd52133c566ce8e1446998a
