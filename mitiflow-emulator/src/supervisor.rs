@@ -366,16 +366,7 @@ impl Supervisor {
         let mut env = HashMap::new();
 
         // Build zenoh config.
-        let zenoh_config = ZenohRoleConfig {
-            mode: match self.config.zenoh.mode {
-                crate::config::ZenohMode::Peer => "peer".into(),
-                crate::config::ZenohMode::Client => "client".into(),
-                crate::config::ZenohMode::Router => "router".into(),
-            },
-            listen: self.config.zenoh.listen.clone(),
-            connect: self.config.zenoh.connect.clone(),
-            timestamping_enabled: self.config.zenoh.timestamping_enabled,
-        };
+        let zenoh_config = ZenohRoleConfig::from(&self.config.zenoh);
         env.insert(
             "MITIFLOW_ZENOH_CONFIG".into(),
             encode_config(&zenoh_config)?,

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{
     CodecConfig, CommitModeDef, ConsumerGroupDef, GeneratorType, OutputConfig, OutputMode,
-    PayloadConfig, ProcessingMode, RecoveryModeConfig, SchemaFieldDef,
+    PayloadConfig, ProcessingMode, RecoveryModeConfig, SchemaFieldDef, ZenohConfig, ZenohMode,
 };
 
 /// Zenoh session config passed to role binaries.
@@ -22,6 +22,39 @@ pub struct ZenohRoleConfig {
     pub connect: Vec<String>,
     #[serde(default)]
     pub timestamping_enabled: bool,
+}
+
+impl ZenohRoleConfig {
+    /// Convert the role transport payload into the shared emulator Zenoh config path.
+    pub fn to_zenoh_config(&self) -> crate::error::Result<zenoh::Config> {
+        ZenohConfig {
+            mode: match self.mode.as_str() {
+                mode if mode.eq_ignore_ascii_case("client") => ZenohMode::Client,
+                mode if mode.eq_ignore_ascii_case("router") => ZenohMode::Router,
+                _ => ZenohMode::Peer,
+            },
+            listen: self.listen.clone(),
+            connect: self.connect.clone(),
+            auto_router: false,
+            timestamping_enabled: self.timestamping_enabled,
+        }
+        .to_zenoh_config()
+    }
+}
+
+impl From<&ZenohConfig> for ZenohRoleConfig {
+    fn from(config: &ZenohConfig) -> Self {
+        Self {
+            mode: match config.mode {
+                ZenohMode::Peer => "peer".into(),
+                ZenohMode::Client => "client".into(),
+                ZenohMode::Router => "router".into(),
+            },
+            listen: config.listen.clone(),
+            connect: config.connect.clone(),
+            timestamping_enabled: config.timestamping_enabled,
+        }
+    }
 }
 
 /// Producer role configuration.
