@@ -29,6 +29,7 @@ async fn main() -> mitiflow::Result<()> {
         .event_bus_config("orders")?
         .cache_size(1000)
         .heartbeat(HeartbeatMode::Periodic(Duration::from_millis(500)))
+        .num_partitions(1)
         .watermark_interval(Duration::from_millis(50))
         .durable_timeout(Duration::from_secs(5))
         .build()?;

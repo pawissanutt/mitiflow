@@ -71,6 +71,7 @@ async fn main() {
             let config = EventBusConfig::builder(topic.clone())
                 .cache_size(10_000)
                 .heartbeat(HeartbeatMode::Disabled)
+                .num_partitions(1)
                 .watermark_interval(Duration::from_millis(10))
                 .durable_timeout(Duration::from_secs(1))
                 .durable_urgency(Duration::from_millis(1))
