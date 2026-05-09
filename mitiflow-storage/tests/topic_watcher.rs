@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use mitiflow::MitiflowDomain;
 use mitiflow_storage::TopicEntry;
 use mitiflow_storage::config::AgentConfig;
 use mitiflow_storage::topic_watcher::{RemoteTopicConfig, should_serve_topic};
@@ -219,10 +220,12 @@ impl MockOrchestrator {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn watcher_discovers_existing_topics_on_startup() {
     let prefix = unique_prefix("discover");
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("watcher_discover")
+        .await
+        .unwrap();
 
     // Setup mock orchestrator with 2 topics.
-    let mut mock = MockOrchestrator::new(&session, &prefix).await;
+    let mut mock = MockOrchestrator::new(domain.session(), &prefix).await;
     mock.configs
         .push(remote_config_with_prefix("orders", &prefix));
     mock.configs
@@ -234,7 +237,7 @@ async fn watcher_discovers_existing_topics_on_startup() {
 
     // Start agent with auto_discover=true, no static topics.
     let (_tmp, config) = agent_config(&prefix, "node-1", true, HashMap::new());
-    let mut agent = mitiflow_storage::StorageAgent::start_multi(&session, config)
+    let mut agent = mitiflow_storage::StorageAgent::start_multi(domain.session(), config)
         .await
         .unwrap();
 
@@ -253,17 +256,20 @@ async fn watcher_discovers_existing_topics_on_startup() {
     );
 
     agent.shutdown().await.unwrap();
-    session.close().await.unwrap();
+    drop(mock);
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn watcher_reacts_to_new_topic() {
     let prefix = unique_prefix("react_new");
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("watcher_react_new")
+        .await
+        .unwrap();
 
     // Start agent with auto_discover, no existing topics in orchestrator.
     let (_tmp, config) = agent_config(&prefix, "node-1", true, HashMap::new());
-    let mut agent = mitiflow_storage::StorageAgent::start_multi(&session, config)
+    let mut agent = mitiflow_storage::StorageAgent::start_multi(domain.session(), config)
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -273,7 +279,7 @@ async fn watcher_reacts_to_new_topic() {
     let cfg = remote_config_with_prefix("events", &prefix);
     let key = format!("{}/_config/{}", prefix, cfg.name);
     let bytes = serde_json::to_vec(&cfg).unwrap();
-    session.put(&key, bytes).await.unwrap();
+    domain.session().put(&key, bytes).await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(500)).await;
     let topics = agent.topics().await;
@@ -284,17 +290,19 @@ async fn watcher_reacts_to_new_topic() {
     );
 
     agent.shutdown().await.unwrap();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn watcher_reacts_to_deleted_topic() {
     let prefix = unique_prefix("react_del");
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("watcher_react_del")
+        .await
+        .unwrap();
 
     // Start agent and add a topic manually.
     let (_tmp, config) = agent_config(&prefix, "node-1", true, HashMap::new());
-    let mut agent = mitiflow_storage::StorageAgent::start_multi(&session, config)
+    let mut agent = mitiflow_storage::StorageAgent::start_multi(domain.session(), config)
         .await
         .unwrap();
 
@@ -310,7 +318,7 @@ async fn watcher_reacts_to_deleted_topic() {
 
     // Publish delete via Zenoh.
     let key = format!("{}/_config/ephemeral", prefix);
-    session.delete(&key).await.unwrap();
+    domain.session().delete(&key).await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(
@@ -319,19 +327,21 @@ async fn watcher_reacts_to_deleted_topic() {
     );
 
     agent.shutdown().await.unwrap();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn watcher_ignores_topic_missing_labels() {
     let prefix = unique_prefix("ignore_labels");
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("watcher_ignore_labels")
+        .await
+        .unwrap();
 
     // Agent has {tier: hdd}, topic requires {tier: ssd}.
     let mut agent_labels = HashMap::new();
     agent_labels.insert("tier".into(), "hdd".into());
     let (_tmp, config) = agent_config(&prefix, "node-1", true, agent_labels);
-    let mut agent = mitiflow_storage::StorageAgent::start_multi(&session, config)
+    let mut agent = mitiflow_storage::StorageAgent::start_multi(domain.session(), config)
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -347,7 +357,8 @@ async fn watcher_ignores_topic_missing_labels() {
         excluded_labels: HashMap::new(),
     };
     let bytes = serde_json::to_vec(&cfg).unwrap();
-    session
+    domain
+        .session()
         .put(format!("{}/_config/hot-data", prefix), bytes)
         .await
         .unwrap();
@@ -359,18 +370,20 @@ async fn watcher_ignores_topic_missing_labels() {
     );
 
     agent.shutdown().await.unwrap();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn watcher_serves_topic_matching_labels() {
     let prefix = unique_prefix("match_labels");
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("watcher_match_labels")
+        .await
+        .unwrap();
 
     let mut agent_labels = HashMap::new();
     agent_labels.insert("rack".into(), "us-east".into());
     let (_tmp, config) = agent_config(&prefix, "node-1", true, agent_labels);
-    let mut agent = mitiflow_storage::StorageAgent::start_multi(&session, config)
+    let mut agent = mitiflow_storage::StorageAgent::start_multi(domain.session(), config)
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -386,7 +399,8 @@ async fn watcher_serves_topic_matching_labels() {
         excluded_labels: HashMap::new(),
     };
     let bytes = serde_json::to_vec(&cfg).unwrap();
-    session
+    domain
+        .session()
         .put(format!("{}/_config/regional", prefix), bytes)
         .await
         .unwrap();
@@ -398,18 +412,20 @@ async fn watcher_serves_topic_matching_labels() {
     );
 
     agent.shutdown().await.unwrap();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn watcher_excludes_by_label() {
     let prefix = unique_prefix("exclude_labels");
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("watcher_exclude_labels")
+        .await
+        .unwrap();
 
     let mut agent_labels = HashMap::new();
     agent_labels.insert("env".into(), "staging".into());
     let (_tmp, config) = agent_config(&prefix, "node-1", true, agent_labels);
-    let mut agent = mitiflow_storage::StorageAgent::start_multi(&session, config)
+    let mut agent = mitiflow_storage::StorageAgent::start_multi(domain.session(), config)
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -425,7 +441,8 @@ async fn watcher_excludes_by_label() {
         excluded_labels: excluded,
     };
     let bytes = serde_json::to_vec(&cfg).unwrap();
-    session
+    domain
+        .session()
         .put(format!("{}/_config/prod-only", prefix), bytes)
         .await
         .unwrap();
@@ -437,16 +454,18 @@ async fn watcher_excludes_by_label() {
     );
 
     agent.shutdown().await.unwrap();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn watcher_idempotent_on_duplicate_config() {
     let prefix = unique_prefix("idempotent");
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("watcher_idempotent")
+        .await
+        .unwrap();
 
     let (_tmp, config) = agent_config(&prefix, "node-1", true, HashMap::new());
-    let mut agent = mitiflow_storage::StorageAgent::start_multi(&session, config)
+    let mut agent = mitiflow_storage::StorageAgent::start_multi(domain.session(), config)
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -456,9 +475,9 @@ async fn watcher_idempotent_on_duplicate_config() {
     let bytes = serde_json::to_vec(&cfg).unwrap();
 
     // Publish same topic twice.
-    session.put(&key, bytes.clone()).await.unwrap();
+    domain.session().put(&key, bytes.clone()).await.unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
-    session.put(&key, bytes).await.unwrap();
+    domain.session().put(&key, bytes).await.unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     let topics = agent.topics().await;
@@ -470,7 +489,7 @@ async fn watcher_idempotent_on_duplicate_config() {
     );
 
     agent.shutdown().await.unwrap();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 // =========================================================================

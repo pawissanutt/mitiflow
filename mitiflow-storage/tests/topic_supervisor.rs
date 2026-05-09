@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use mitiflow::MitiflowDomain;
 use mitiflow_storage::{AgentConfig, AgentConfigBuilder, TopicEntry, TopicSupervisor};
 
 fn make_config(test_name: &str, topics: Vec<(&str, u32, u32)>) -> (tempfile::TempDir, AgentConfig) {
@@ -29,10 +30,14 @@ fn make_config(test_name: &str, topics: Vec<(&str, u32, u32)>) -> (tempfile::Tem
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn supervisor_add_single_topic() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("sup_single")
+        .await
+        .unwrap();
     let (_tmp, config) = make_config("sup_single", vec![("events", 4, 1)]);
 
-    let mut supervisor = TopicSupervisor::start(&session, &config).await.unwrap();
+    let mut supervisor = TopicSupervisor::start(domain.session(), &config)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     assert!(supervisor.has_topic("events"));
@@ -43,15 +48,19 @@ async fn supervisor_add_single_topic() {
     assert_eq!(assigned.len(), 4, "should own all 4 partitions");
 
     supervisor.shutdown().await.unwrap();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn supervisor_add_multiple_topics() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("sup_multi")
+        .await
+        .unwrap();
     let (_tmp, config) = make_config("sup_multi", vec![("events", 4, 1), ("logs", 3, 1)]);
 
-    let mut supervisor = TopicSupervisor::start(&session, &config).await.unwrap();
+    let mut supervisor = TopicSupervisor::start(domain.session(), &config)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     assert_eq!(supervisor.topics().len(), 2);
@@ -75,15 +84,19 @@ async fn supervisor_add_multiple_topics() {
     assert_eq!(total, 7, "total should be 7");
 
     supervisor.shutdown().await.unwrap();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn supervisor_remove_topic() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("sup_remove")
+        .await
+        .unwrap();
     let (_tmp, config) = make_config("sup_remove", vec![("events", 4, 1), ("logs", 2, 1)]);
 
-    let mut supervisor = TopicSupervisor::start(&session, &config).await.unwrap();
+    let mut supervisor = TopicSupervisor::start(domain.session(), &config)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(supervisor.topics().len(), 2);
 
@@ -101,29 +114,35 @@ async fn supervisor_remove_topic() {
     assert_eq!(logs_parts.len(), 2);
 
     supervisor.shutdown().await.unwrap();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn supervisor_remove_nonexistent_is_noop() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("sup_noop").await.unwrap();
     let (_tmp, config) = make_config("sup_noop", vec![("events", 2, 1)]);
 
-    let mut supervisor = TopicSupervisor::start(&session, &config).await.unwrap();
+    let mut supervisor = TopicSupervisor::start(domain.session(), &config)
+        .await
+        .unwrap();
 
     let removed = supervisor.remove_topic("does_not_exist").await.unwrap();
     assert!(!removed, "should return false for nonexistent topic");
 
     supervisor.shutdown().await.unwrap();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn supervisor_shutdown_stops_all() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("sup_shutdown")
+        .await
+        .unwrap();
     let (_tmp, config) = make_config("sup_shutdown", vec![("events", 4, 1), ("logs", 2, 1)]);
 
-    let mut supervisor = TopicSupervisor::start(&session, &config).await.unwrap();
+    let mut supervisor = TopicSupervisor::start(domain.session(), &config)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     supervisor.shutdown().await.unwrap();
@@ -131,15 +150,19 @@ async fn supervisor_shutdown_stops_all() {
     // All topics should be removed after shutdown.
     assert!(supervisor.topics().is_empty());
 
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn supervisor_add_topic_at_runtime() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("sup_runtime")
+        .await
+        .unwrap();
     let (_tmp, config) = make_config("sup_runtime", vec![("events", 2, 1)]);
 
-    let mut supervisor = TopicSupervisor::start(&session, &config).await.unwrap();
+    let mut supervisor = TopicSupervisor::start(domain.session(), &config)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(supervisor.topics().len(), 1);
 
@@ -164,15 +187,17 @@ async fn supervisor_add_topic_at_runtime() {
     assert_eq!(metrics_parts.len(), 3);
 
     supervisor.shutdown().await.unwrap();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn supervisor_duplicate_topic_errors() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("sup_dup").await.unwrap();
     let (_tmp, config) = make_config("sup_dup", vec![("events", 2, 1)]);
 
-    let mut supervisor = TopicSupervisor::start(&session, &config).await.unwrap();
+    let mut supervisor = TopicSupervisor::start(domain.session(), &config)
+        .await
+        .unwrap();
 
     let entry = TopicEntry {
         name: "events".to_string(),
@@ -184,7 +209,7 @@ async fn supervisor_duplicate_topic_errors() {
     assert!(result.is_err(), "duplicate topic should error");
 
     supervisor.shutdown().await.unwrap();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -214,8 +239,10 @@ async fn supervisor_separate_data_dirs_per_topic() {
         .build()
         .unwrap();
 
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let mut supervisor = TopicSupervisor::start(&session, &config).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("sup_dirs").await.unwrap();
+    let mut supervisor = TopicSupervisor::start(domain.session(), &config)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Verify that topic data dirs are separate subdirectories.
@@ -225,16 +252,20 @@ async fn supervisor_separate_data_dirs_per_topic() {
     assert!(logs_dir.exists(), "logs data dir should exist");
 
     supervisor.shutdown().await.unwrap();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn supervisor_topics_isolated_assignment() {
     // Two topics on same node, each should get independent partition assignment.
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("sup_isolated")
+        .await
+        .unwrap();
     let (_tmp, config) = make_config("sup_isolated", vec![("events", 4, 1), ("logs", 6, 1)]);
 
-    let mut supervisor = TopicSupervisor::start(&session, &config).await.unwrap();
+    let mut supervisor = TopicSupervisor::start(domain.session(), &config)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let events = supervisor
@@ -262,5 +293,5 @@ async fn supervisor_topics_isolated_assignment() {
     }
 
     supervisor.shutdown().await.unwrap();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
