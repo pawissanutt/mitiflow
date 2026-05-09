@@ -15,8 +15,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use mitiflow::{
-    Event, EventBusConfig, EventPublisher, EventStore, EventSubscriber, FjallBackend,
-    HeartbeatMode, OffloadConfig,
+    Event, EventPublisher, EventStore, EventSubscriber, FjallBackend, HeartbeatMode,
+    MitiflowDomain, OffloadConfig,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,7 +31,9 @@ async fn main() -> mitiflow::Result<()> {
         .with_env_filter("mitiflow=debug")
         .init();
 
-    let session = zenoh::open(zenoh::Config::default()).await?;
+    let domain = MitiflowDomain::builder("examples-slow-consumer-offload")
+        .open()
+        .await?;
 
     // Configure with a small channel and aggressive thresholds for demo.
     let offload = OffloadConfig {
@@ -41,7 +43,8 @@ async fn main() -> mitiflow::Result<()> {
         ..OffloadConfig::default()
     };
 
-    let config = EventBusConfig::builder("demo/offload")
+    let config = domain
+        .event_bus_config("offload")?
         .cache_size(100)
         .heartbeat(HeartbeatMode::Disabled)
         .watermark_interval(Duration::from_millis(50))
@@ -53,13 +56,13 @@ async fn main() -> mitiflow::Result<()> {
     // Start the event store (required for catch-up reads).
     let store_dir = tempfile::tempdir().expect("failed to create temp dir");
     let backend = FjallBackend::open(store_dir.path(), 0)?;
-    let mut store = EventStore::new(&session, backend, config.clone());
+    let mut store = EventStore::new(domain.session(), backend, config.clone());
     store.run().await?;
     println!("EventStore running");
 
     // Create subscriber and publisher.
-    let subscriber = EventSubscriber::new(&session, config.clone()).await?;
-    let publisher = EventPublisher::new(&session, config).await?;
+    let subscriber = EventSubscriber::new(domain.session(), config.clone()).await?;
+    let publisher = EventPublisher::new(domain.session(), config).await?;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Spawn a task to monitor offload lifecycle events.
@@ -110,7 +113,8 @@ async fn main() -> mitiflow::Result<()> {
     drop(publisher);
     subscriber.shutdown().await;
     store.shutdown();
-    session.close().await?;
+    drop(store);
+    domain.shutdown().await?;
 
     Ok(())
 }

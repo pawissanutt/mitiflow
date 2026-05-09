@@ -4,19 +4,26 @@ use std::time::Duration;
 
 #[tokio::main]
 async fn main() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let prefix = "test/qfinal";
-    let key = format!("{prefix}/_store/0");
+    let domain = MitiflowDomain::builder("examples-test-queryable")
+        .open()
+        .await
+        .unwrap();
     let dir = tempfile::tempdir().unwrap();
     let backend = FjallBackend::open(dir.path(), 0).unwrap();
-    let config = EventBusConfig::builder(prefix)
+    let config = domain
+        .event_bus_config("qfinal")
+        .unwrap()
         .cache_size(10)
         .build()
         .unwrap();
-    let mut store = EventStore::new(&session, backend, config.clone());
+    let prefix = config.key_prefix.clone();
+    let key = format!("{prefix}/_store/0");
+    let mut store = EventStore::new(domain.session(), backend, config.clone());
     store.run().await.unwrap();
 
-    let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
     let pub_key = format!("{prefix}/p/0/test");
     for i in 0..5u32 {
         publisher
@@ -27,7 +34,8 @@ async fn main() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Query WITH accept_replies(Any) — should work now
-    let r = session
+    let r = domain
+        .session()
         .get(&key)
         .accept_replies(zenoh::query::ReplyKeyExpr::Any)
         .consolidation(zenoh::query::ConsolidationMode::None)
@@ -44,5 +52,6 @@ async fn main() {
 
     store.shutdown();
     drop(publisher);
-    session.close().await.unwrap();
+    drop(store);
+    domain.shutdown().await.unwrap();
 }

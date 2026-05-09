@@ -21,16 +21,16 @@ are planned but not implemented yet.
 
 ## Quick Start
 
-```rust
-use mitiflow::{Event, EventBusConfig, EventPublisher, EventSubscriber};
+```rust,no_run
+use mitiflow::{Event, EventPublisher, EventSubscriber, MitiflowDomain};
 
 #[tokio::main]
 async fn main() -> mitiflow::Result<()> {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let config = EventBusConfig::builder("demo/sensors").build()?;
+    let domain = MitiflowDomain::builder("demo").open().await?;
+    let config = domain.event_bus_config("sensors")?.build()?;
 
-    let subscriber = EventSubscriber::new(&session, config.clone()).await?;
-    let publisher = EventPublisher::new(&session, config).await?;
+    let subscriber = EventSubscriber::new(domain.session(), config.clone()).await?;
+    let publisher = EventPublisher::new(domain.session(), config).await?;
 
     let event = Event::new(serde_json::json!({"temp": 22.5}));
     publisher.publish(&event).await?;
@@ -40,7 +40,31 @@ async fn main() -> mitiflow::Result<()> {
 
     drop(publisher);
     drop(subscriber);
-    session.close().await.unwrap();
+    domain.shutdown().await?;
+    Ok(())
+}
+```
+
+## Domains
+
+`MitiflowDomain` combines namespace and transport isolation: derived event-bus
+configs are rooted in a domain namespace, while the domain opens a Zenoh session
+using its selected `TransportProfile`.
+
+```rust,no_run
+use mitiflow::{MitiflowDomain, TransportProfile};
+
+#[tokio::main]
+async fn main() -> mitiflow::Result<()> {
+    let domain = MitiflowDomain::builder("orders-dev")
+        .transport(TransportProfile::LocalIsolated)
+        .open()
+        .await?;
+
+    let config = domain.event_bus_config("events")?.build()?;
+    assert_eq!(config.key_prefix, "mitiflow/orders-dev/topics/events");
+
+    domain.shutdown().await?;
     Ok(())
 }
 ```
