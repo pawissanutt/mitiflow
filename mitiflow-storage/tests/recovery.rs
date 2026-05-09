@@ -8,14 +8,16 @@ use std::time::Duration;
 
 use mitiflow::store::backend::StorageBackend;
 use mitiflow::store::query::QueryFilters;
-use mitiflow::{EventBusConfig, EventPublisher, EventStore, FjallBackend};
+use mitiflow::{EventBusConfig, EventPublisher, EventStore, FjallBackend, MitiflowDomain};
 use mitiflow_storage::recovery::RecoveryManager;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn recovery_from_peer_no_peers() {
     // Recovery with no peers should return 0 events recovered.
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let recovery = RecoveryManager::new(&session, "test/recovery_no_peers");
+    let domain = MitiflowDomain::isolated_for_test("recovery_no_peers")
+        .await
+        .unwrap();
+    let recovery = RecoveryManager::new(domain.session(), "test/recovery_no_peers");
 
     let tmp = tempfile::tempdir().unwrap();
     let backend = Arc::new(FjallBackend::open(tmp.path(), 0).unwrap());
@@ -26,15 +28,17 @@ async fn recovery_from_peer_no_peers() {
         .unwrap();
     assert_eq!(recovered, 0, "no peers = no recovery");
 
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn recovery_from_peer_unreachable() {
     // Recovery querying a non-existent peer queryable should not error,
     // just return 0 recovered events (graceful fallback).
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let recovery = RecoveryManager::new(&session, "test/recovery_unreachable");
+    let domain = MitiflowDomain::isolated_for_test("recovery_unreachable")
+        .await
+        .unwrap();
+    let recovery = RecoveryManager::new(domain.session(), "test/recovery_unreachable");
 
     let tmp = tempfile::tempdir().unwrap();
     let backend = Arc::new(FjallBackend::open(tmp.path(), 0).unwrap());
@@ -50,7 +54,7 @@ async fn recovery_from_peer_unreachable() {
     // With no queryable listening on the store key, get() will return 0 replies.
     assert_eq!(recovered, 0, "unreachable peer = 0 recovered");
 
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -58,7 +62,9 @@ async fn recovery_from_peer_with_store() {
     // Set up a real EventStore as a peer, publish events, then recover
     // into a fresh backend and verify the events were stored.
     let prefix = "test/recovery_store_real";
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("recovery_store_real")
+        .await
+        .unwrap();
 
     // --- Peer: EventStore for partition 0 with some published events ---
     let peer_tmp = tempfile::tempdir().unwrap();
@@ -67,11 +73,11 @@ async fn recovery_from_peer_with_store() {
         .cache_size(100)
         .build()
         .unwrap();
-    let mut peer_store = EventStore::new(&session, peer_backend, bus_config.clone());
+    let mut peer_store = EventStore::new(domain.session(), peer_backend, bus_config.clone());
     peer_store.run().await.unwrap();
 
     // Publish 5 events to partition 0.
-    let publisher = EventPublisher::new(&session, bus_config.clone())
+    let publisher = EventPublisher::new(domain.session(), bus_config.clone())
         .await
         .unwrap();
     let pub_key = format!("{prefix}/p/0/test");
@@ -93,7 +99,7 @@ async fn recovery_from_peer_with_store() {
     let local_backend: Arc<dyn StorageBackend> =
         Arc::new(FjallBackend::open(local_tmp.path(), 0).unwrap());
 
-    let recovery = RecoveryManager::new(&session, prefix);
+    let recovery = RecoveryManager::new(domain.session(), prefix);
     let recovered = recovery
         .recover(0, &local_backend, &["peer-node".to_string()])
         .await
@@ -105,15 +111,18 @@ async fn recovery_from_peer_with_store() {
     let local_events = local_backend.query(&QueryFilters::default()).unwrap();
     assert_eq!(local_events.len(), 5, "local backend should have 5 events");
 
+    drop(publisher);
     peer_store.shutdown();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn recovery_from_cache_no_queryable() {
     // When no publisher cache queryable exists, cache recovery returns 0.
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let recovery = RecoveryManager::new(&session, "test/recovery_cache_empty");
+    let domain = MitiflowDomain::isolated_for_test("recovery_cache_empty")
+        .await
+        .unwrap();
+    let recovery = RecoveryManager::new(domain.session(), "test/recovery_cache_empty");
 
     let tmp = tempfile::tempdir().unwrap();
     let backend: Arc<dyn StorageBackend> = Arc::new(FjallBackend::open(tmp.path(), 0).unwrap());
@@ -121,7 +130,7 @@ async fn recovery_from_cache_no_queryable() {
     let recovered = recovery.recover_from_cache(0, &backend).await.unwrap();
     assert_eq!(recovered, 0, "no cache queryable = 0 recovered");
 
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -129,7 +138,9 @@ async fn recovery_idempotent() {
     // Recovering the same events twice should produce the same count in backend.
     // FjallBackend's (publisher_id, seq) keying makes this a no-op overwrite.
     let prefix = "test/recovery_idempotent_data";
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("recovery_idempotent")
+        .await
+        .unwrap();
 
     // --- Peer store with 3 events ---
     let peer_tmp = tempfile::tempdir().unwrap();
@@ -138,10 +149,10 @@ async fn recovery_idempotent() {
         .cache_size(100)
         .build()
         .unwrap();
-    let mut peer_store = EventStore::new(&session, peer_backend, bus_config.clone());
+    let mut peer_store = EventStore::new(domain.session(), peer_backend, bus_config.clone());
     peer_store.run().await.unwrap();
 
-    let publisher = EventPublisher::new(&session, bus_config.clone())
+    let publisher = EventPublisher::new(domain.session(), bus_config.clone())
         .await
         .unwrap();
     let pub_key = format!("{prefix}/p/0/test");
@@ -158,7 +169,7 @@ async fn recovery_idempotent() {
     let local_backend: Arc<dyn StorageBackend> =
         Arc::new(FjallBackend::open(local_tmp.path(), 0).unwrap());
 
-    let recovery = RecoveryManager::new(&session, prefix);
+    let recovery = RecoveryManager::new(domain.session(), prefix);
     let r1 = recovery
         .recover(0, &local_backend, &["peer-node".to_string()])
         .await
@@ -177,6 +188,7 @@ async fn recovery_idempotent() {
     let events = local_backend.query(&QueryFilters::default()).unwrap();
     assert_eq!(events.len(), 3, "idempotent: 3 events, not 6");
 
+    drop(publisher);
     peer_store.shutdown();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }

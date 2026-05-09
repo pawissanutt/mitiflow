@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use mitiflow::EventBusConfig;
+use mitiflow::{EventBusConfig, MitiflowDomain};
 use mitiflow_storage::StoreState;
 use mitiflow_storage::reconciler::{ReconcileAction, Reconciler};
 
@@ -18,14 +18,16 @@ fn bus_config(test_name: &str) -> EventBusConfig {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconciler_starts_stores_for_assigned_partitions() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("reconciler_start")
+        .await
+        .unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let config = bus_config("reconciler_start");
 
     let reconciler = Reconciler::new(
         "node-1".into(),
         tmp.path().to_path_buf(),
-        session.clone(),
+        domain.session().clone(),
         config,
         Duration::from_secs(5),
     );
@@ -51,19 +53,21 @@ async fn reconciler_starts_stores_for_assigned_partitions() {
     assert!(active.contains(&(3, 0)));
 
     reconciler.shutdown_all().await.unwrap();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconciler_stops_stores_for_lost_partitions() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("reconciler_stop")
+        .await
+        .unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let config = bus_config("reconciler_stop");
 
     let reconciler = Reconciler::new(
         "node-1".into(),
         tmp.path().to_path_buf(),
-        session.clone(),
+        domain.session().clone(),
         config,
         Duration::from_millis(100), // Short grace period for test speed.
     );
@@ -87,19 +91,21 @@ async fn reconciler_stops_stores_for_lost_partitions() {
     assert!(active.contains(&(0, 0)));
 
     reconciler.shutdown_all().await.unwrap();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconciler_noop_when_aligned() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("reconciler_noop")
+        .await
+        .unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let config = bus_config("reconciler_noop");
 
     let reconciler = Reconciler::new(
         "node-1".into(),
         tmp.path().to_path_buf(),
-        session.clone(),
+        domain.session().clone(),
         config,
         Duration::from_secs(5),
     );
@@ -112,19 +118,21 @@ async fn reconciler_noop_when_aligned() {
     assert!(actions.is_empty(), "no actions when already aligned");
 
     reconciler.shutdown_all().await.unwrap();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconciler_handles_simultaneous_gain_and_loss() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("reconciler_gain_loss")
+        .await
+        .unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let config = bus_config("reconciler_gain_loss");
 
     let reconciler = Reconciler::new(
         "node-1".into(),
         tmp.path().to_path_buf(),
-        session.clone(),
+        domain.session().clone(),
         config,
         Duration::from_millis(100),
     );
@@ -149,19 +157,21 @@ async fn reconciler_handles_simultaneous_gain_and_loss() {
     assert!(active.contains(&(5, 0)));
 
     reconciler.shutdown_all().await.unwrap();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconciler_drain_grace_period() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("reconciler_drain")
+        .await
+        .unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let config = bus_config("reconciler_drain");
 
     let reconciler = Reconciler::new(
         "node-1".into(),
         tmp.path().to_path_buf(),
-        session.clone(),
+        domain.session().clone(),
         config,
         Duration::from_millis(500), // 500ms grace period.
     );
@@ -196,19 +206,22 @@ async fn reconciler_drain_grace_period() {
     // No active stores left.
     assert!(reconciler.active_stores().await.is_empty());
 
-    session.close().await.unwrap();
+    drop(reconciler);
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconciler_tracks_store_state_transitions() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("reconciler_states")
+        .await
+        .unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let config = bus_config("reconciler_states");
 
     let reconciler = Reconciler::new(
         "node-1".into(),
         tmp.path().to_path_buf(),
-        session.clone(),
+        domain.session().clone(),
         config,
         Duration::from_secs(5),
     );
@@ -223,19 +236,21 @@ async fn reconciler_tracks_store_state_transitions() {
     assert_eq!(statuses[0].state, StoreState::Active);
 
     reconciler.shutdown_all().await.unwrap();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconciler_multi_replica() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("reconciler_multi_replica")
+        .await
+        .unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let config = bus_config("reconciler_multi_replica");
 
     let reconciler = Reconciler::new(
         "node-1".into(),
         tmp.path().to_path_buf(),
-        session.clone(),
+        domain.session().clone(),
         config,
         Duration::from_secs(5),
     );
@@ -256,19 +271,21 @@ async fn reconciler_multi_replica() {
     assert!(path_1_1.exists(), "p1/r1 data dir should exist");
 
     reconciler.shutdown_all().await.unwrap();
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconciler_shutdown_all_stops_everything() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("reconciler_shutdown")
+        .await
+        .unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let config = bus_config("reconciler_shutdown");
 
     let reconciler = Reconciler::new(
         "node-1".into(),
         tmp.path().to_path_buf(),
-        session.clone(),
+        domain.session().clone(),
         config,
         Duration::from_secs(5),
     );
@@ -285,7 +302,7 @@ async fn reconciler_shutdown_all_stops_everything() {
         "all stores stopped after shutdown"
     );
 
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -295,7 +312,9 @@ async fn reconciler_triggers_recovery_on_start() {
     use mitiflow_storage::recovery::RecoveryManager;
     use std::sync::Arc;
 
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("reconciler_recovery")
+        .await
+        .unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let config = bus_config("reconciler_recovery");
 
@@ -306,20 +325,23 @@ async fn reconciler_triggers_recovery_on_start() {
         .unwrap();
 
     let membership = Arc::new(
-        MembershipTracker::new(&session, &agent_config)
+        MembershipTracker::new(domain.session(), &agent_config)
             .await
             .unwrap(),
     );
-    let recovery = Arc::new(RecoveryManager::new(&session, "test/reconciler_recovery"));
+    let recovery = Arc::new(RecoveryManager::new(
+        domain.session(),
+        "test/reconciler_recovery",
+    ));
 
     let reconciler = Reconciler::new(
         "recovery-test".into(),
         tmp.path().to_path_buf(),
-        session.clone(),
+        domain.session().clone(),
         config,
         Duration::from_secs(5),
     )
-    .with_recovery(recovery, membership);
+    .with_recovery(recovery, membership.clone());
 
     // Start p0 — should transition through Starting → Recovering → Active.
     reconciler.reconcile(&[(0, 0)]).await.unwrap();
@@ -335,5 +357,6 @@ async fn reconciler_triggers_recovery_on_start() {
     assert_eq!(statuses[0].state, StoreState::Active);
 
     reconciler.shutdown_all().await.unwrap();
-    session.close().await.unwrap();
+    membership.shutdown().await;
+    domain.shutdown().await.unwrap();
 }

@@ -2,23 +2,30 @@
 
 use std::time::Duration;
 
+use mitiflow::MitiflowDomain;
 use mitiflow_storage::health::HealthReporter;
 use mitiflow_storage::status::StatusReporter;
 use mitiflow_storage::types::{NodeHealth, NodeStatus, PartitionStatus, StoreState};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn health_reporter_publishes_periodically() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("health_periodic")
+        .await
+        .unwrap();
     let key_prefix = "test/health_periodic";
     let node_id = "node-h1";
     let health_key = format!("{key_prefix}/_cluster/health/{node_id}");
 
     // Subscribe to health updates.
-    let subscriber = session.declare_subscriber(&health_key).await.unwrap();
+    let subscriber = domain
+        .session()
+        .declare_subscriber(&health_key)
+        .await
+        .unwrap();
 
     // Create health reporter with a short interval.
     let reporter = HealthReporter::new(
-        &session,
+        domain.session(),
         node_id.into(),
         key_prefix,
         Duration::from_millis(200),
@@ -39,21 +46,28 @@ async fn health_reporter_publishes_periodically() {
         "expected >= 2 health reports, got {received}"
     );
 
+    drop(subscriber);
     reporter.shutdown().await;
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn health_reporter_includes_partition_count() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("health_fields")
+        .await
+        .unwrap();
     let key_prefix = "test/health_fields";
     let node_id = "node-h2";
     let health_key = format!("{key_prefix}/_cluster/health/{node_id}");
 
-    let subscriber = session.declare_subscriber(&health_key).await.unwrap();
+    let subscriber = domain
+        .session()
+        .declare_subscriber(&health_key)
+        .await
+        .unwrap();
 
     let reporter = HealthReporter::new(
-        &session,
+        domain.session(),
         node_id.into(),
         key_prefix,
         Duration::from_millis(200),
@@ -78,20 +92,27 @@ async fn health_reporter_includes_partition_count() {
     assert_eq!(health.store_latency_p99_us, 42);
     assert_eq!(health.error_count, 0);
 
+    drop(subscriber);
     reporter.shutdown().await;
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn status_reporter_publishes_on_change() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("status_change")
+        .await
+        .unwrap();
     let key_prefix = "test/status_change";
     let node_id = "node-s1";
     let status_key = format!("{key_prefix}/_cluster/status/{node_id}");
 
-    let subscriber = session.declare_subscriber(&status_key).await.unwrap();
+    let subscriber = domain
+        .session()
+        .declare_subscriber(&status_key)
+        .await
+        .unwrap();
 
-    let reporter = StatusReporter::new(&session, node_id.into(), key_prefix)
+    let reporter = StatusReporter::new(domain.session(), node_id.into(), key_prefix)
         .await
         .unwrap();
 
@@ -143,22 +164,29 @@ async fn status_reporter_publishes_on_change() {
         assert_eq!(status.partitions.len(), 2);
     }
 
+    drop(subscriber);
     reporter.shutdown().await;
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn status_reporter_periodic_heartbeat() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::isolated_for_test("status_heartbeat")
+        .await
+        .unwrap();
     let key_prefix = "test/status_heartbeat";
     let node_id = "node-s2";
     let status_key = format!("{key_prefix}/_cluster/status/{node_id}");
 
-    let subscriber = session.declare_subscriber(&status_key).await.unwrap();
+    let subscriber = domain
+        .session()
+        .declare_subscriber(&status_key)
+        .await
+        .unwrap();
 
     // The status reporter has a 30s heartbeat by default - that's too slow for tests.
     // We'll just verify that report() works on demand.
-    let reporter = StatusReporter::new(&session, node_id.into(), key_prefix)
+    let reporter = StatusReporter::new(domain.session(), node_id.into(), key_prefix)
         .await
         .unwrap();
 
@@ -174,6 +202,7 @@ async fn status_reporter_periodic_heartbeat() {
     // Empty partitions since we reported with no partitions.
     assert!(status.partitions.is_empty());
 
+    drop(subscriber);
     reporter.shutdown().await;
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
