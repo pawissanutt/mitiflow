@@ -213,16 +213,12 @@ mod inner {
         const NUM_PARTITIONS: u32 = 12;
         let session = domain.session();
 
-        let worker_a = PartitionManager::new(
-            session,
-            worker_config(domain, "worker-a", NUM_PARTITIONS)?,
-        )
-        .await?;
-        let worker_b = PartitionManager::new(
-            session,
-            worker_config(domain, "worker-b", NUM_PARTITIONS)?,
-        )
-        .await?;
+        let worker_a =
+            PartitionManager::new(session, worker_config(domain, "worker-a", NUM_PARTITIONS)?)
+                .await?;
+        let worker_b =
+            PartitionManager::new(session, worker_config(domain, "worker-b", NUM_PARTITIONS)?)
+                .await?;
         tokio::time::sleep(Duration::from_millis(400)).await;
 
         let parts_a = worker_a.my_partitions().await;
@@ -243,11 +239,9 @@ mod inner {
             })
             .await;
 
-        let worker_c = PartitionManager::new(
-            session,
-            worker_config(domain, "worker-c", NUM_PARTITIONS)?,
-        )
-        .await?;
+        let worker_c =
+            PartitionManager::new(session, worker_config(domain, "worker-c", NUM_PARTITIONS)?)
+                .await?;
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         let parts_a = worker_a.my_partitions().await;

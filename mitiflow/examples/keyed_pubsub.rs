@@ -43,7 +43,8 @@ async fn main() -> mitiflow::Result<()> {
     let all_sub = EventSubscriber::new(domain.session(), config.clone()).await?;
 
     // ── 2. Key-filtered subscriber (receives only "order-123" events) ──
-    let filtered_sub = EventSubscriber::new_keyed(domain.session(), config.clone(), "order-123").await?;
+    let filtered_sub =
+        EventSubscriber::new_keyed(domain.session(), config.clone(), "order-123").await?;
 
     let publisher = EventPublisher::new(domain.session(), config).await?;
     tokio::time::sleep(Duration::from_millis(100)).await;
