@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use mitiflow::{Event, EventBusConfig, EventPublisher, EventSubscriber, HeartbeatMode};
+use mitiflow::{Event, EventPublisher, EventSubscriber, HeartbeatMode, MitiflowDomain};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OrderEvent {
@@ -28,21 +28,24 @@ async fn main() -> mitiflow::Result<()> {
         .with_env_filter("mitiflow=debug,keyed_pubsub=info")
         .init();
 
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = MitiflowDomain::builder("examples-keyed-pubsub")
+        .open()
+        .await?;
 
-    let config = EventBusConfig::builder("demo/orders")
+    let config = domain
+        .event_bus_config("orders")?
         .cache_size(100)
         .heartbeat(HeartbeatMode::Disabled)
         .num_partitions(8)
         .build()?;
 
     // ── 1. Wildcard subscriber (receives all events) ──
-    let all_sub = EventSubscriber::new(&session, config.clone()).await?;
+    let all_sub = EventSubscriber::new(domain.session(), config.clone()).await?;
 
     // ── 2. Key-filtered subscriber (receives only "order-123" events) ──
-    let filtered_sub = EventSubscriber::new_keyed(&session, config.clone(), "order-123").await?;
+    let filtered_sub = EventSubscriber::new_keyed(domain.session(), config.clone(), "order-123").await?;
 
-    let publisher = EventPublisher::new(&session, config).await?;
+    let publisher = EventPublisher::new(domain.session(), config).await?;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // ── 3. Publish keyed events ──
@@ -134,7 +137,7 @@ async fn main() -> mitiflow::Result<()> {
     drop(publisher);
     drop(all_sub);
     drop(filtered_sub);
-    session.close().await.unwrap();
+    domain.shutdown().await?;
 
     Ok(())
 }

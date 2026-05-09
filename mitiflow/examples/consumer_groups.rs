@@ -18,7 +18,8 @@ mod inner {
 
     use mitiflow::{
         CommitMode, ConsumerGroupConfig, ConsumerGroupSubscriber, Event, EventBusConfig,
-        EventPublisher, EventStore, FjallBackend, HeartbeatMode, OffsetReset, PartitionManager,
+        EventPublisher, EventStore, FjallBackend, HeartbeatMode, MitiflowDomain, OffsetReset,
+        PartitionManager,
     };
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,16 +28,25 @@ mod inner {
         action: String,
     }
 
-    fn base_config(num_partitions: u32) -> mitiflow::Result<EventBusConfig> {
-        EventBusConfig::builder("demo/consumer_group")
+    fn base_config(
+        domain: &MitiflowDomain,
+        num_partitions: u32,
+    ) -> mitiflow::Result<EventBusConfig> {
+        domain
+            .event_bus_config("consumer-group")?
             .cache_size(200)
             .heartbeat(HeartbeatMode::Periodic(Duration::from_millis(200)))
             .num_partitions(num_partitions)
             .build()
     }
 
-    fn worker_config(worker_id: &str, num_partitions: u32) -> mitiflow::Result<EventBusConfig> {
-        EventBusConfig::builder("demo/consumer_group")
+    fn worker_config(
+        domain: &MitiflowDomain,
+        worker_id: &str,
+        num_partitions: u32,
+    ) -> mitiflow::Result<EventBusConfig> {
+        domain
+            .event_bus_config("consumer-group")?
             .cache_size(200)
             .heartbeat(HeartbeatMode::Disabled)
             .num_partitions(num_partitions)
@@ -45,15 +55,17 @@ mod inner {
     }
 
     /// Phase 1: ConsumerGroupSubscriber with manual commit.
-    async fn phase_consumer_group(session: &zenoh::Session) -> mitiflow::Result<()> {
+    async fn phase_consumer_group(domain: &MitiflowDomain) -> mitiflow::Result<()> {
         println!("=== Phase 1: ConsumerGroupSubscriber with manual commit ===\n");
         const NUM_PARTITIONS: u32 = 4;
+        let session = domain.session();
 
         // Start an EventStore so offset commits have somewhere to persist.
         let store_dir = tempfile::tempdir().unwrap();
         let backend =
             FjallBackend::open(store_dir.path(), 0).expect("failed to open fjall backend");
-        let store_config = EventBusConfig::builder("demo/consumer_group")
+        let store_config = domain
+            .event_bus_config("consumer-group")?
             .num_partitions(NUM_PARTITIONS)
             .build()?;
         let mut store = EventStore::new(session, backend, store_config.clone());
@@ -61,7 +73,7 @@ mod inner {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Create a publisher.
-        let pub_config = base_config(NUM_PARTITIONS)?;
+        let pub_config = base_config(domain, NUM_PARTITIONS)?;
         let publisher = EventPublisher::new(session, pub_config).await?;
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -72,7 +84,7 @@ mod inner {
             commit_mode: CommitMode::Manual,
             offset_reset: OffsetReset::Earliest,
         };
-        let consumer_config = base_config(NUM_PARTITIONS)?;
+        let consumer_config = base_config(domain, NUM_PARTITIONS)?;
         let consumer = ConsumerGroupSubscriber::new(session, consumer_config, group_config).await?;
         tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -122,21 +134,24 @@ mod inner {
     }
 
     /// Phase 2: Auto-commit mode.
-    async fn phase_auto_commit(session: &zenoh::Session) -> mitiflow::Result<()> {
+    async fn phase_auto_commit(domain: &MitiflowDomain) -> mitiflow::Result<()> {
         println!("\n=== Phase 2: Auto-commit mode ===\n");
         const NUM_PARTITIONS: u32 = 4;
+        let session = domain.session();
 
         let store_dir = tempfile::tempdir().unwrap();
         let backend =
             FjallBackend::open(store_dir.path(), 0).expect("failed to open fjall backend");
-        let store_config = EventBusConfig::builder("demo/consumer_group_auto")
+        let store_config = domain
+            .event_bus_config("consumer-group-auto")?
             .num_partitions(NUM_PARTITIONS)
             .build()?;
         let mut store = EventStore::new(session, backend, store_config.clone());
         store.run().await?;
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        let pub_config = EventBusConfig::builder("demo/consumer_group_auto")
+        let pub_config = domain
+            .event_bus_config("consumer-group-auto")?
             .cache_size(200)
             .heartbeat(HeartbeatMode::Periodic(Duration::from_millis(200)))
             .num_partitions(NUM_PARTITIONS)
@@ -153,7 +168,8 @@ mod inner {
             },
             offset_reset: OffsetReset::Earliest,
         };
-        let consumer_config = EventBusConfig::builder("demo/consumer_group_auto")
+        let consumer_config = domain
+            .event_bus_config("consumer-group-auto")?
             .num_partitions(NUM_PARTITIONS)
             .build()?;
         let consumer = ConsumerGroupSubscriber::new(session, consumer_config, group_config).await?;
@@ -192,14 +208,21 @@ mod inner {
     }
 
     /// Phase 3: PartitionManager rebalancing demo.
-    async fn phase_rebalancing(session: &zenoh::Session) -> mitiflow::Result<()> {
+    async fn phase_rebalancing(domain: &MitiflowDomain) -> mitiflow::Result<()> {
         println!("\n=== Phase 3: PartitionManager rebalancing ===\n");
         const NUM_PARTITIONS: u32 = 12;
+        let session = domain.session();
 
-        let worker_a =
-            PartitionManager::new(session, worker_config("worker-a", NUM_PARTITIONS)?).await?;
-        let worker_b =
-            PartitionManager::new(session, worker_config("worker-b", NUM_PARTITIONS)?).await?;
+        let worker_a = PartitionManager::new(
+            session,
+            worker_config(domain, "worker-a", NUM_PARTITIONS)?,
+        )
+        .await?;
+        let worker_b = PartitionManager::new(
+            session,
+            worker_config(domain, "worker-b", NUM_PARTITIONS)?,
+        )
+        .await?;
         tokio::time::sleep(Duration::from_millis(400)).await;
 
         let parts_a = worker_a.my_partitions().await;
@@ -220,8 +243,11 @@ mod inner {
             })
             .await;
 
-        let worker_c =
-            PartitionManager::new(session, worker_config("worker-c", NUM_PARTITIONS)?).await?;
+        let worker_c = PartitionManager::new(
+            session,
+            worker_config(domain, "worker-c", NUM_PARTITIONS)?,
+        )
+        .await?;
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         let parts_a = worker_a.my_partitions().await;
@@ -256,13 +282,15 @@ mod inner {
             .with_env_filter("mitiflow=info,consumer_groups=info")
             .init();
 
-        let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+        let domain = MitiflowDomain::builder("examples-consumer-groups")
+            .open()
+            .await?;
 
-        phase_consumer_group(&session).await?;
-        phase_auto_commit(&session).await?;
-        phase_rebalancing(&session).await?;
+        phase_consumer_group(&domain).await?;
+        phase_auto_commit(&domain).await?;
+        phase_rebalancing(&domain).await?;
 
-        session.close().await.unwrap();
+        domain.shutdown().await?;
         println!("\nConsumer group example complete.");
         Ok(())
     }
