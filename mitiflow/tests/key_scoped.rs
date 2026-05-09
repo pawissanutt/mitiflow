@@ -14,8 +14,10 @@ use common::TestPayload;
 use mitiflow::{Event, EventBusConfig, EventPublisher, EventSubscriber, HeartbeatMode};
 
 /// Config with heartbeats enabled — passthrough mode should still skip recovery.
-fn passthrough_config(test_name: &str) -> EventBusConfig {
-    EventBusConfig::builder(format!("test/{test_name}"))
+fn passthrough_config(domain: &mitiflow::MitiflowDomain) -> EventBusConfig {
+    domain
+        .event_bus_config("events")
+        .expect("valid topic")
         .cache_size(1000)
         .heartbeat(HeartbeatMode::Periodic(Duration::from_millis(200)))
         .history_on_subscribe(false)
@@ -29,12 +31,14 @@ fn passthrough_config(test_name: &str) -> EventBusConfig {
 /// trigger false gap recovery from sparse sequences.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn key_filtered_no_false_gaps() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let config = passthrough_config("kf_no_false_gaps");
-    let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
+    let domain = common::isolated_domain("kf_no_false_gaps").await;
+    let config = passthrough_config(&domain);
+    let publisher = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
 
     // Key-filtered subscriber for "alpha" only.
-    let sub = EventSubscriber::new_keyed(&session, config, "alpha")
+    let sub = EventSubscriber::new_keyed(domain.session(), config, "alpha")
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -85,18 +89,20 @@ async fn key_filtered_no_false_gaps() {
 
     drop(sub);
     drop(publisher);
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 /// Key-prefix filtered subscriber receives matching prefix events.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn key_prefix_filtered_no_false_gaps() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let config = passthrough_config("kf_prefix_no_gaps");
-    let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
+    let domain = common::isolated_domain("kf_prefix_no_gaps").await;
+    let config = passthrough_config(&domain);
+    let publisher = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
 
     // Subscribe to key prefix "user/1"
-    let sub = EventSubscriber::new_key_prefix(&session, config, "user/1")
+    let sub = EventSubscriber::new_key_prefix(domain.session(), config, "user/1")
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -144,17 +150,19 @@ async fn key_prefix_filtered_no_false_gaps() {
 
     drop(sub);
     drop(publisher);
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 /// Key-filtered subscriber with heartbeats enabled does not trigger
 /// recovery for sequences it hasn't seen (which belong to other keys).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn key_filtered_heartbeat_no_recovery() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = common::isolated_domain("kf_hb_no_recovery").await;
 
     // Heartbeats enabled at a fast interval to trigger within test window.
-    let config = EventBusConfig::builder("test/kf_hb_no_recovery")
+    let config = domain
+        .event_bus_config("events")
+        .unwrap()
         .cache_size(1000)
         .heartbeat(HeartbeatMode::Periodic(Duration::from_millis(100)))
         .history_on_subscribe(false)
@@ -163,8 +171,10 @@ async fn key_filtered_heartbeat_no_recovery() {
         .build()
         .unwrap();
 
-    let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
-    let sub = EventSubscriber::new_keyed(&session, config, "target")
+    let publisher = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
+    let sub = EventSubscriber::new_keyed(domain.session(), config, "target")
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -195,7 +205,7 @@ async fn key_filtered_heartbeat_no_recovery() {
 
     drop(sub);
     drop(publisher);
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 /// Key-filtered subscriber and unfiltered subscriber can coexist:
@@ -203,16 +213,18 @@ async fn key_filtered_heartbeat_no_recovery() {
 /// - Key-filtered subscriber gets only matching events with event-ID dedup.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn key_filtered_and_unfiltered_coexist() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let config = passthrough_config("kf_coexist");
-    let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
+    let domain = common::isolated_domain("kf_coexist").await;
+    let config = passthrough_config(&domain);
+    let publisher = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
 
     // Unfiltered subscriber (standard gap detection).
-    let all_sub = EventSubscriber::new(&session, config.clone())
+    let all_sub = EventSubscriber::new(domain.session(), config.clone())
         .await
         .unwrap();
     // Key-filtered subscriber for "target".
-    let key_sub = EventSubscriber::new_keyed(&session, config, "target")
+    let key_sub = EventSubscriber::new_keyed(domain.session(), config, "target")
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -255,19 +267,23 @@ async fn key_filtered_and_unfiltered_coexist() {
     drop(key_sub);
     drop(all_sub);
     drop(publisher);
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 /// Multiple publishers send interleaved keyed events — key-filtered subscriber
 /// receives only matching events from ALL publishers, in arrival order.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn key_filtered_multi_publisher() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let config = passthrough_config("kf_multi_pub");
+    let domain = common::isolated_domain("kf_multi_pub").await;
+    let config = passthrough_config(&domain);
 
-    let pub_a = EventPublisher::new(&session, config.clone()).await.unwrap();
-    let pub_b = EventPublisher::new(&session, config.clone()).await.unwrap();
-    let sub = EventSubscriber::new_keyed(&session, config, "target")
+    let pub_a = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
+    let pub_b = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
+    let sub = EventSubscriber::new_keyed(domain.session(), config, "target")
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -311,18 +327,20 @@ async fn key_filtered_multi_publisher() {
     drop(sub);
     drop(pub_a);
     drop(pub_b);
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 /// Key-prefix subscriber with many distinct sub-keys receives all matching events
 /// while not triggering false gap recovery from the sparse sequences.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn key_prefix_many_subkeys() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let config = passthrough_config("kf_prefix_many");
-    let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
+    let domain = common::isolated_domain("kf_prefix_many").await;
+    let config = passthrough_config(&domain);
+    let publisher = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
 
-    let sub = EventSubscriber::new_key_prefix(&session, config, "org/acme")
+    let sub = EventSubscriber::new_key_prefix(domain.session(), config, "org/acme")
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -357,7 +375,7 @@ async fn key_prefix_many_subkeys() {
 
     drop(sub);
     drop(publisher);
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 /// Live passthrough subscriber and KeyedConsumer coexist on the same topic.
@@ -365,13 +383,12 @@ async fn key_prefix_many_subkeys() {
 #[cfg(feature = "store")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn passthrough_and_keyed_consumer_coexist() {
-    let mut zen_config = zenoh::Config::default();
-    zen_config
-        .insert_json5("timestamping/enabled", "true")
-        .unwrap();
-    let session = zenoh::open(zen_config).await.unwrap();
+    // LocalIsolated already enables timestamping/enabled — required for HLC ordering.
+    let domain = common::isolated_domain("kf_coexist_store").await;
 
-    let config = EventBusConfig::builder("test/kf_coexist_store")
+    let config = domain
+        .event_bus_config("events")
+        .unwrap()
         .cache_size(1000)
         .heartbeat(HeartbeatMode::Periodic(Duration::from_millis(200)))
         .history_on_subscribe(false)
@@ -386,12 +403,14 @@ async fn passthrough_and_keyed_consumer_coexist() {
     let tmp = common::temp_dir("kf_coexist_store");
     let backend: std::sync::Arc<dyn mitiflow::store::backend::StorageBackend> =
         std::sync::Arc::new(mitiflow::store::FjallBackend::open(tmp.path(), 0).unwrap());
-    let mut store = mitiflow::EventStore::new(&session, backend.clone(), config.clone());
+    let mut store = mitiflow::EventStore::new(domain.session(), backend.clone(), config.clone());
     store.run().await.unwrap();
 
-    let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config.clone())
+        .await
+        .unwrap();
     // Live passthrough subscriber for "alpha" only
-    let live_sub = EventSubscriber::new_keyed(&session, config.clone(), "alpha")
+    let live_sub = EventSubscriber::new_keyed(domain.session(), config.clone(), "alpha")
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -425,7 +444,7 @@ async fn passthrough_and_keyed_consumer_coexist() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // KeyedConsumer queries from the store — sees the same 2 alpha events.
-    let mut consumer = mitiflow::KeyedConsumer::builder(&session, config)
+    let mut consumer = mitiflow::KeyedConsumer::builder(domain.session(), config)
         .key("alpha")
         .partition(0)
         .batch_size(100)
@@ -439,7 +458,7 @@ async fn passthrough_and_keyed_consumer_coexist() {
     drop(live_sub);
     drop(store);
     drop(publisher);
-    session.close().await.unwrap();
+    domain.shutdown().await.unwrap();
 }
 
 // ── Phase 3: KeyedConsumer (pull-based, store-mediated) ─────────────────────
@@ -454,11 +473,13 @@ mod keyed_consumer_tests {
     use mitiflow::store::backend::StorageBackend;
     use mitiflow::{
         CodecFormat, Event, EventBusConfig, EventPublisher, EventStore, FjallBackend,
-        HeartbeatMode, KeyedConsumer,
+        HeartbeatMode, KeyedConsumer, MitiflowDomain,
     };
 
-    fn store_config(test_name: &str) -> EventBusConfig {
-        EventBusConfig::builder(format!("test/{test_name}"))
+    fn store_config(domain: &MitiflowDomain) -> EventBusConfig {
+        domain
+            .event_bus_config("events")
+            .expect("valid topic")
             .cache_size(1000)
             .heartbeat(HeartbeatMode::Periodic(Duration::from_millis(200)))
             .history_on_subscribe(false)
@@ -470,35 +491,31 @@ mod keyed_consumer_tests {
             .expect("valid config")
     }
 
-    /// Helper: open a Zenoh session with HLC timestamping enabled by default.
-    async fn open_session_with_hlc() -> zenoh::Session {
-        let mut config = zenoh::Config::default();
-        config
-            .insert_json5("timestamping/enabled", "true")
-            .expect("valid config");
-        zenoh::open(config).await.unwrap()
-    }
-
     /// Helper: set up a store, publisher, publish keyed events, and wait for persistence.
+    ///
+    /// LocalIsolated transport already enables `timestamping/enabled = true`
+    /// (required for HLC ordering used by the replay index).
     async fn setup_store_with_keyed_events(
         test_name: &str,
         keys_and_values: &[(&str, u64)],
     ) -> (
-        zenoh::Session,
+        MitiflowDomain,
         EventPublisher,
         EventStore,
         std::sync::Arc<dyn StorageBackend>,
         tempfile::TempDir,
         EventBusConfig,
     ) {
-        let session = open_session_with_hlc().await;
-        let config = store_config(test_name);
+        let domain = common::isolated_domain(test_name).await;
+        let config = store_config(&domain);
         let tmp = common::temp_dir(test_name);
         let backend: std::sync::Arc<dyn StorageBackend> =
             std::sync::Arc::new(FjallBackend::open(tmp.path(), 0).unwrap());
-        let mut store = EventStore::new(&session, backend.clone(), config.clone());
+        let mut store = EventStore::new(domain.session(), backend.clone(), config.clone());
         store.run().await.unwrap();
-        let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
+        let publisher = EventPublisher::new(domain.session(), config.clone())
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         for (key, value) in keys_and_values {
@@ -511,13 +528,13 @@ mod keyed_consumer_tests {
         // Wait for store to persist all events.
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        (session, publisher, store, backend, tmp, config)
+        (domain, publisher, store, backend, tmp, config)
     }
 
     /// poll() returns events in HLC order for an exact key.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn keyed_consumer_poll_exact_key() {
-        let (session, publisher, store, _backend, _tmp, config) = setup_store_with_keyed_events(
+        let (domain, publisher, store, _backend, _tmp, config) = setup_store_with_keyed_events(
             "kc_poll_exact",
             &[
                 ("order-A", 1),
@@ -529,7 +546,7 @@ mod keyed_consumer_tests {
         )
         .await;
 
-        let mut consumer = KeyedConsumer::builder(&session, config)
+        let mut consumer = KeyedConsumer::builder(domain.session(), config)
             .key("order-A")
             .partition(0)
             .batch_size(100)
@@ -552,13 +569,13 @@ mod keyed_consumer_tests {
         drop(consumer);
         drop(store);
         drop(publisher);
-        session.close().await.unwrap();
+        domain.shutdown().await.unwrap();
     }
 
     /// poll() returns events for a key prefix.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn keyed_consumer_poll_key_prefix() {
-        let (session, publisher, store, _backend, _tmp, config) = setup_store_with_keyed_events(
+        let (domain, publisher, store, _backend, _tmp, config) = setup_store_with_keyed_events(
             "kc_poll_prefix",
             &[
                 ("order-100", 1),
@@ -570,7 +587,7 @@ mod keyed_consumer_tests {
         )
         .await;
 
-        let mut consumer = KeyedConsumer::builder(&session, config)
+        let mut consumer = KeyedConsumer::builder(domain.session(), config)
             .key_prefix("order-")
             .partition(0)
             .batch_size(100)
@@ -586,17 +603,17 @@ mod keyed_consumer_tests {
         drop(consumer);
         drop(store);
         drop(publisher);
-        session.close().await.unwrap();
+        domain.shutdown().await.unwrap();
     }
 
     /// Cursor advances — second poll returns no duplicates.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn keyed_consumer_cursor_advances() {
-        let (session, publisher, store, _backend, _tmp, config) =
+        let (domain, publisher, store, _backend, _tmp, config) =
             setup_store_with_keyed_events("kc_cursor", &[("alpha", 1), ("beta", 2), ("alpha", 3)])
                 .await;
 
-        let mut consumer = KeyedConsumer::builder(&session, config.clone())
+        let mut consumer = KeyedConsumer::builder(domain.session(), config.clone())
             .key("alpha")
             .partition(0)
             .batch_size(100)
@@ -625,16 +642,16 @@ mod keyed_consumer_tests {
         drop(consumer);
         drop(store);
         drop(publisher);
-        session.close().await.unwrap();
+        domain.shutdown().await.unwrap();
     }
 
     /// poll() returns empty when no matching events exist.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn keyed_consumer_empty_poll() {
-        let (session, publisher, store, _backend, _tmp, config) =
+        let (domain, publisher, store, _backend, _tmp, config) =
             setup_store_with_keyed_events("kc_empty", &[("order-A", 1)]).await;
 
-        let mut consumer = KeyedConsumer::builder(&session, config)
+        let mut consumer = KeyedConsumer::builder(domain.session(), config)
             .key("non-existent-key")
             .partition(0)
             .batch_size(100)
@@ -647,17 +664,17 @@ mod keyed_consumer_tests {
         drop(consumer);
         drop(store);
         drop(publisher);
-        session.close().await.unwrap();
+        domain.shutdown().await.unwrap();
     }
 
     /// seek() repositions the cursor.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn keyed_consumer_seek() {
-        let (session, publisher, store, _backend, _tmp, config) =
+        let (domain, publisher, store, _backend, _tmp, config) =
             setup_store_with_keyed_events("kc_seek", &[("alpha", 1), ("alpha", 2), ("alpha", 3)])
                 .await;
 
-        let mut consumer = KeyedConsumer::builder(&session, config)
+        let mut consumer = KeyedConsumer::builder(domain.session(), config)
             .key("alpha")
             .partition(0)
             .batch_size(100)
@@ -679,19 +696,19 @@ mod keyed_consumer_tests {
         drop(consumer);
         drop(store);
         drop(publisher);
-        session.close().await.unwrap();
+        domain.shutdown().await.unwrap();
     }
 
     /// commit() + fetch_offset() roundtrip: committed HLC is retrievable.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn keyed_consumer_commit_fetch_roundtrip() {
-        let (session, publisher, store, _backend, _tmp, config) = setup_store_with_keyed_events(
+        let (domain, publisher, store, _backend, _tmp, config) = setup_store_with_keyed_events(
             "kc_commit_rt",
             &[("alpha", 1), ("alpha", 2), ("alpha", 3)],
         )
         .await;
 
-        let mut consumer = KeyedConsumer::builder(&session, config)
+        let mut consumer = KeyedConsumer::builder(domain.session(), config)
             .key("alpha")
             .partition(0)
             .batch_size(100)
@@ -729,26 +746,26 @@ mod keyed_consumer_tests {
         drop(consumer);
         drop(store);
         drop(publisher);
-        session.close().await.unwrap();
+        domain.shutdown().await.unwrap();
     }
 
     /// Different key filters maintain independent offsets within the same group.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn keyed_consumer_independent_offsets() {
-        let (session, publisher, store, _backend, _tmp, config) = setup_store_with_keyed_events(
+        let (domain, publisher, store, _backend, _tmp, config) = setup_store_with_keyed_events(
             "kc_indep_off",
             &[("alpha", 1), ("beta", 2), ("alpha", 3), ("beta", 4)],
         )
         .await;
 
-        let mut alpha_consumer = KeyedConsumer::builder(&session, config.clone())
+        let mut alpha_consumer = KeyedConsumer::builder(domain.session(), config.clone())
             .key("alpha")
             .partition(0)
             .batch_size(100)
             .build()
             .unwrap();
 
-        let mut beta_consumer = KeyedConsumer::builder(&session, config)
+        let mut beta_consumer = KeyedConsumer::builder(domain.session(), config)
             .key("beta")
             .partition(0)
             .batch_size(100)
@@ -795,7 +812,7 @@ mod keyed_consumer_tests {
         drop(beta_consumer);
         drop(store);
         drop(publisher);
-        session.close().await.unwrap();
+        domain.shutdown().await.unwrap();
     }
 
     // ── Additional integration / E2E tests ──────────────────────────────────
@@ -804,16 +821,20 @@ mod keyed_consumer_tests {
     /// in deterministic HLC order across all publishers.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn keyed_consumer_cross_publisher_hlc_order() {
-        let session = open_session_with_hlc().await;
-        let config = store_config("kc_cross_pub");
+        let domain = common::isolated_domain("kc_cross_pub").await;
+        let config = store_config(&domain);
         let tmp = common::temp_dir("kc_cross_pub");
         let backend: std::sync::Arc<dyn StorageBackend> =
             std::sync::Arc::new(FjallBackend::open(tmp.path(), 0).unwrap());
-        let mut store = EventStore::new(&session, backend.clone(), config.clone());
+        let mut store = EventStore::new(domain.session(), backend.clone(), config.clone());
         store.run().await.unwrap();
 
-        let pub_a = EventPublisher::new(&session, config.clone()).await.unwrap();
-        let pub_b = EventPublisher::new(&session, config.clone()).await.unwrap();
+        let pub_a = EventPublisher::new(domain.session(), config.clone())
+            .await
+            .unwrap();
+        let pub_b = EventPublisher::new(domain.session(), config.clone())
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // Interleave keyed events from two publishers for the same key.
@@ -839,7 +860,7 @@ mod keyed_consumer_tests {
 
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        let mut consumer = KeyedConsumer::builder(&session, config)
+        let mut consumer = KeyedConsumer::builder(domain.session(), config)
             .key("shared-key")
             .partition(0)
             .batch_size(100)
@@ -878,20 +899,22 @@ mod keyed_consumer_tests {
         drop(store);
         drop(pub_a);
         drop(pub_b);
-        session.close().await.unwrap();
+        domain.shutdown().await.unwrap();
     }
 
     /// batch_size limits results per poll; multiple polls drain all events.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn keyed_consumer_batch_pagination() {
-        let session = open_session_with_hlc().await;
-        let config = store_config("kc_batch_page");
+        let domain = common::isolated_domain("kc_batch_page").await;
+        let config = store_config(&domain);
         let tmp = common::temp_dir("kc_batch_page");
         let backend: std::sync::Arc<dyn StorageBackend> =
             std::sync::Arc::new(FjallBackend::open(tmp.path(), 0).unwrap());
-        let mut store = EventStore::new(&session, backend.clone(), config.clone());
+        let mut store = EventStore::new(domain.session(), backend.clone(), config.clone());
         store.run().await.unwrap();
-        let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
+        let publisher = EventPublisher::new(domain.session(), config.clone())
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // Publish 7 events for the same key.
@@ -904,7 +927,7 @@ mod keyed_consumer_tests {
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        let mut consumer = KeyedConsumer::builder(&session, config)
+        let mut consumer = KeyedConsumer::builder(domain.session(), config)
             .key("paginated")
             .partition(0)
             .batch_size(3) // small batch
@@ -940,19 +963,19 @@ mod keyed_consumer_tests {
         drop(consumer);
         drop(store);
         drop(publisher);
-        session.close().await.unwrap();
+        domain.shutdown().await.unwrap();
     }
 
     /// Commit offset → create a new consumer → fetch_offset → seek → resume.
     /// Simulates consumer restart.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn keyed_consumer_resume_from_committed_offset() {
-        let (session, publisher, store, _backend, _tmp, config) =
+        let (domain, publisher, store, _backend, _tmp, config) =
             setup_store_with_keyed_events("kc_resume", &[("order", 1), ("order", 2), ("order", 3)])
                 .await;
 
         // First consumer polls all events and commits.
-        let mut consumer1 = KeyedConsumer::builder(&session, config.clone())
+        let mut consumer1 = KeyedConsumer::builder(domain.session(), config.clone())
             .key("order")
             .partition(0)
             .batch_size(100)
@@ -971,7 +994,7 @@ mod keyed_consumer_tests {
             .unwrap();
 
         // Second consumer fetches the committed offset and resumes.
-        let mut consumer2 = KeyedConsumer::builder(&session, config)
+        let mut consumer2 = KeyedConsumer::builder(domain.session(), config)
             .key("order")
             .partition(0)
             .batch_size(100)
@@ -993,20 +1016,22 @@ mod keyed_consumer_tests {
         drop(consumer2);
         drop(store);
         drop(publisher);
-        session.close().await.unwrap();
+        domain.shutdown().await.unwrap();
     }
 
     /// Durable keyed publish end-to-end: publish_keyed_durable → store → KeyedConsumer poll.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn keyed_consumer_durable_publish_e2e() {
-        let session = open_session_with_hlc().await;
-        let config = store_config("kc_durable_e2e");
+        let domain = common::isolated_domain("kc_durable_e2e").await;
+        let config = store_config(&domain);
         let tmp = common::temp_dir("kc_durable_e2e");
         let backend: std::sync::Arc<dyn StorageBackend> =
             std::sync::Arc::new(FjallBackend::open(tmp.path(), 0).unwrap());
-        let mut store = EventStore::new(&session, backend.clone(), config.clone());
+        let mut store = EventStore::new(domain.session(), backend.clone(), config.clone());
         store.run().await.unwrap();
-        let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
+        let publisher = EventPublisher::new(domain.session(), config.clone())
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // publish_keyed_durable waits for store watermark acknowledgement.
@@ -1015,7 +1040,7 @@ mod keyed_consumer_tests {
             .await
             .unwrap();
 
-        let mut consumer = KeyedConsumer::builder(&session, config)
+        let mut consumer = KeyedConsumer::builder(domain.session(), config)
             .key("durable-key")
             .partition(0)
             .batch_size(100)
@@ -1033,21 +1058,23 @@ mod keyed_consumer_tests {
         drop(consumer);
         drop(store);
         drop(publisher);
-        session.close().await.unwrap();
+        domain.shutdown().await.unwrap();
     }
 
     /// Key-prefix filter: publish events with multiple sub-keys under a prefix,
     /// poll with advancing cursor across batches.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn keyed_consumer_prefix_with_cursor_pagination() {
-        let session = open_session_with_hlc().await;
-        let config = store_config("kc_prefix_pag");
+        let domain = common::isolated_domain("kc_prefix_pag").await;
+        let config = store_config(&domain);
         let tmp = common::temp_dir("kc_prefix_pag");
         let backend: std::sync::Arc<dyn StorageBackend> =
             std::sync::Arc::new(FjallBackend::open(tmp.path(), 0).unwrap());
-        let mut store = EventStore::new(&session, backend.clone(), config.clone());
+        let mut store = EventStore::new(domain.session(), backend.clone(), config.clone());
         store.run().await.unwrap();
-        let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
+        let publisher = EventPublisher::new(domain.session(), config.clone())
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // Publish events with prefix "user-" and non-prefix keys.
@@ -1068,7 +1095,7 @@ mod keyed_consumer_tests {
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        let mut consumer = KeyedConsumer::builder(&session, config)
+        let mut consumer = KeyedConsumer::builder(domain.session(), config)
             .key_prefix("user-")
             .partition(0)
             .batch_size(2)
@@ -1109,21 +1136,23 @@ mod keyed_consumer_tests {
         drop(consumer);
         drop(store);
         drop(publisher);
-        session.close().await.unwrap();
+        domain.shutdown().await.unwrap();
     }
 
     /// High-cardinality keys: 50 distinct keys, each with a few events.
     /// KeyedConsumer correctly filters down to only the target key.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn keyed_consumer_high_cardinality() {
-        let session = open_session_with_hlc().await;
-        let config = store_config("kc_hi_card");
+        let domain = common::isolated_domain("kc_hi_card").await;
+        let config = store_config(&domain);
         let tmp = common::temp_dir("kc_hi_card");
         let backend: std::sync::Arc<dyn StorageBackend> =
             std::sync::Arc::new(FjallBackend::open(tmp.path(), 0).unwrap());
-        let mut store = EventStore::new(&session, backend.clone(), config.clone());
+        let mut store = EventStore::new(domain.session(), backend.clone(), config.clone());
         store.run().await.unwrap();
-        let publisher = EventPublisher::new(&session, config.clone()).await.unwrap();
+        let publisher = EventPublisher::new(domain.session(), config.clone())
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // Publish 3 events each for 50 distinct keys (150 total).
@@ -1143,7 +1172,7 @@ mod keyed_consumer_tests {
         tokio::time::sleep(Duration::from_millis(1000)).await;
 
         // Query a single key.
-        let mut consumer = KeyedConsumer::builder(&session, config.clone())
+        let mut consumer = KeyedConsumer::builder(domain.session(), config.clone())
             .key("entity-025")
             .partition(0)
             .batch_size(500)
@@ -1171,6 +1200,6 @@ mod keyed_consumer_tests {
         drop(consumer);
         drop(store);
         drop(publisher);
-        session.close().await.unwrap();
+        domain.shutdown().await.unwrap();
     }
 }

@@ -1,5 +1,7 @@
 //! Integration tests for the Dead Letter Queue.
 
+mod common;
+
 use std::time::Duration;
 
 use mitiflow::DeadLetterQueue;
@@ -20,9 +22,9 @@ fn make_raw_event() -> RawEvent {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dlq_retry_then_send() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = common::isolated_domain("dlq").await;
     let config = DlqConfig::new("test/dlq", 3);
-    let mut dlq = DeadLetterQueue::new(&session, config);
+    let mut dlq = DeadLetterQueue::new(domain.session(), config);
 
     let event = make_raw_event();
 
@@ -46,13 +48,16 @@ async fn dlq_retry_then_send() {
 
     // Counter is cleared — next failure starts fresh.
     assert_eq!(dlq.attempt_count(&event.id), 0);
+
+    drop(dlq);
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dlq_ack_clears_counter() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = common::isolated_domain("dlq_ack").await;
     let config = DlqConfig::new("test/dlq_ack", 5);
-    let mut dlq = DeadLetterQueue::new(&session, config);
+    let mut dlq = DeadLetterQueue::new(domain.session(), config);
 
     let event = make_raw_event();
 
@@ -63,11 +68,14 @@ async fn dlq_ack_clears_counter() {
     dlq.ack(&event.id);
     assert_eq!(dlq.attempt_count(&event.id), 0);
     assert_eq!(dlq.pending_count(), 0);
+
+    drop(dlq);
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dlq_backoff_delays() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = common::isolated_domain("dlq_bo").await;
     let config = DlqConfig {
         max_retries: 10,
         dlq_key_prefix: "test/dlq_bo".to_string(),
@@ -76,7 +84,7 @@ async fn dlq_backoff_delays() {
             max: Duration::from_secs(5),
         },
     };
-    let mut dlq = DeadLetterQueue::new(&session, config);
+    let mut dlq = DeadLetterQueue::new(domain.session(), config);
 
     let event = make_raw_event();
 
@@ -100,20 +108,24 @@ async fn dlq_backoff_delays() {
         RetryOutcome::Retry { delay, .. } => assert_eq!(delay, Duration::from_millis(200)),
         _ => panic!("expected retry"),
     }
+
+    drop(dlq);
+    domain.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dlq_routes_to_zenoh_topic() {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    let domain = common::isolated_domain("dlq_route").await;
 
     // Subscribe to DLQ topic to verify the event arrives.
-    let dlq_sub = session
+    let dlq_sub = domain
+        .session()
         .declare_subscriber("test/dlq_route/**")
         .await
         .unwrap();
 
     let config = DlqConfig::new("test/dlq_route", 1); // max_retries=1 → first failure goes to DLQ.
-    let mut dlq = DeadLetterQueue::new(&session, config);
+    let mut dlq = DeadLetterQueue::new(domain.session(), config);
 
     let event = make_raw_event();
     let outcome = dlq.on_failure(&event).await.unwrap();
@@ -127,4 +139,8 @@ async fn dlq_routes_to_zenoh_topic() {
 
     let received_payload = sample.payload().to_bytes().to_vec();
     assert_eq!(received_payload, event.payload);
+
+    drop(dlq);
+    drop(dlq_sub);
+    domain.shutdown().await.unwrap();
 }
