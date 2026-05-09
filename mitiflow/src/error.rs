@@ -7,6 +7,8 @@ use thiserror::Error;
 
 use crate::types::PublisherId;
 
+pub use crate::domain::DomainError;
+
 /// Alias for `std::result::Result<T, mitiflow::Error>`.
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -180,6 +182,11 @@ pub enum Error {
         )
     )]
     OffsetNotFound { group_id: String },
+
+    /// A domain value is invalid.
+    #[error("domain error: {0}")]
+    #[diagnostic(code(mitiflow::domain))]
+    Domain(#[from] DomainError),
 }
 
 impl From<serde_json::Error> for Error {
