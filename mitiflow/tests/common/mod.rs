@@ -4,7 +4,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use mitiflow::{Event, EventBusConfig, EventPublisher, EventSubscriber, HeartbeatMode};
+use mitiflow::{
+    Event, EventBusConfig, EventPublisher, EventSubscriber, HeartbeatMode, MitiflowDomain,
+};
 
 /// Common test payload.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -13,9 +15,25 @@ pub struct TestPayload {
 }
 
 #[allow(dead_code)]
-/// Create an `EventBusConfig` with a unique key prefix for the given test name.
-pub fn test_config(test_name: &str) -> EventBusConfig {
-    EventBusConfig::builder(format!("test/{test_name}"))
+/// Open a `MitiflowDomain` isolated for the given test name.
+///
+/// Each call returns a domain with a unique id (UUID-suffixed) using the
+/// `LocalIsolated` transport profile, so concurrent tests cannot reach each
+/// other over Zenoh even when they share key prefixes.
+pub async fn isolated_domain(test_name: &str) -> MitiflowDomain {
+    MitiflowDomain::isolated_for_test(test_name)
+        .await
+        .expect("isolated domain should open")
+}
+
+#[allow(dead_code)]
+/// Build an `EventBusConfig` rooted in the given domain's namespace.
+///
+/// The derived key prefix is `"{namespace_root}/topics/events"`.
+pub fn test_config(domain: &MitiflowDomain) -> EventBusConfig {
+    domain
+        .event_bus_config("events")
+        .expect("topic 'events' is valid")
         .cache_size(1000)
         .heartbeat(HeartbeatMode::Periodic(Duration::from_millis(200)))
         .history_on_subscribe(false)
@@ -24,18 +42,22 @@ pub fn test_config(test_name: &str) -> EventBusConfig {
 }
 
 #[allow(dead_code)]
-/// Open a peer-mode Zenoh session and create a connected publisher + subscriber pair.
+/// Open an isolated `MitiflowDomain` and create a connected publisher +
+/// subscriber pair on its session.
 ///
-/// Returns `(session, publisher, subscriber)`. Includes a 100ms settle delay.
-pub async fn setup_pubsub(test_name: &str) -> (zenoh::Session, EventPublisher, EventSubscriber) {
-    let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-    let config = test_config(test_name);
-    let subscriber = EventSubscriber::new(&session, config.clone())
+/// Returns `(domain, publisher, subscriber)`. Includes a 100ms settle delay.
+///
+/// Callers must `drop` the publisher and subscriber **before** calling
+/// `domain.shutdown().await` to avoid Zenoh close timeouts.
+pub async fn setup_pubsub(test_name: &str) -> (MitiflowDomain, EventPublisher, EventSubscriber) {
+    let domain = isolated_domain(test_name).await;
+    let config = test_config(&domain);
+    let subscriber = EventSubscriber::new(domain.session(), config.clone())
         .await
         .unwrap();
-    let publisher = EventPublisher::new(&session, config).await.unwrap();
+    let publisher = EventPublisher::new(domain.session(), config).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    (session, publisher, subscriber)
+    (domain, publisher, subscriber)
 }
 
 #[allow(dead_code)]

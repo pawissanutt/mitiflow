@@ -2,19 +2,23 @@
 //! durable workloads.
 //!
 //! ```rust,no_run
-//! use mitiflow::{EventBusConfig, StoreManager};
+//! use mitiflow::StoreManager;
 //!
-//! # async fn example() {
-//! let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-//! let config = EventBusConfig::builder("demo/events".to_string())
+//! # async fn example() -> mitiflow::Result<()> {
+//! let domain = mitiflow::MitiflowDomain::builder("store-manager-example")
+//!     .open()
+//!     .await?;
+//! let config = domain
+//!     .event_bus_config("events")?
 //!     .num_partitions(4)
-//!     .build()
-//!     .unwrap();
+//!     .build()?;
 //! let tmp = std::env::temp_dir().join("store-mgr");
-//! let mut mgr = StoreManager::new(&session, config, &tmp).expect("open stores");
-//! mgr.run().await.expect("start stores");
+//! let mut mgr = StoreManager::new(domain.session(), config, &tmp)?;
+//! mgr.run().await?;
 //! // ... run benchmark ...
 //! mgr.shutdown_gracefully().await;
+//! domain.shutdown().await?;
+//! # Ok(())
 //! # }
 //! ```
 

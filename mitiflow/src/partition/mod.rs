@@ -35,13 +35,18 @@ pub type RebalanceCb = Arc<RwLock<Option<Box<dyn Fn(&[u32], &[u32]) + Send + Syn
 ///
 /// ```rust,no_run
 /// # async fn run() -> mitiflow::Result<()> {
-/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
-/// let config = mitiflow::EventBusConfig::builder("myapp/events")
+/// let domain = mitiflow::MitiflowDomain::builder("partition-example")
+///     .open()
+///     .await?;
+/// let config = domain
+///     .event_bus_config("events")?
 ///     .worker_id("worker-1")
 ///     .num_partitions(64)
 ///     .build()?;
-/// let pm = mitiflow::partition::PartitionManager::new(&session, config).await?;
+/// let pm = mitiflow::partition::PartitionManager::new(domain.session(), config).await?;
 /// println!("My partitions: {:?}", pm.my_partitions().await);
+/// drop(pm);
+/// domain.shutdown().await?;
 /// # Ok(())
 /// # }
 /// ```
