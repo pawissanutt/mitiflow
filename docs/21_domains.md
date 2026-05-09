@@ -197,38 +197,166 @@ work identically.
 
 ---
 
-## 7. Migration from Key-Prefix-Only Setups
+## 7. Migration from Raw Zenoh Sessions
 
-Before domains existed, every test and example called `zenoh::open` directly
-and built `EventBusConfig` with a literal key prefix:
+Before domains existed, most examples, binaries, and tests opened Zenoh
+directly and then passed a literal key prefix into `EventBusConfig`:
 
-```rust
-let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+```rust,no_run
+// Legacy pattern shown for migration context only. New code should open a
+// MitiflowDomain instead of raw Zenoh defaults.
+let session = zenoh::open(zenoh::Config::default()).await?;
 let config = EventBusConfig::builder("myapp/events").build()?;
+
+let subscriber = EventSubscriber::new(&session, config.clone()).await?;
+let publisher = EventPublisher::new(&session, config).await?;
 ```
 
-The domain-based equivalent:
+The domain-based equivalent opens a `MitiflowDomain`, derives the event-bus
+prefix from its namespace, and reuses `domain.session()` for every component in
+that domain:
 
-```rust
-let domain = MitiflowDomain::builder("myapp")
-    .transport(TransportProfile::LocalIsolated)
-    .open()
-    .await?;
+```rust,no_run
+let domain = MitiflowDomain::builder("myapp").open().await?;
 let config = domain.event_bus_config("events")?.build()?;
-// key_prefix = "mitiflow/myapp/topics/events"
+// default key_prefix = "mitiflow/myapp/topics/events"
+
+let subscriber = EventSubscriber::new(domain.session(), config.clone()).await?;
+let publisher = EventPublisher::new(domain.session(), config).await?;
+
+drop(publisher);
+drop(subscriber);
+domain.shutdown().await?;
 ```
 
-Migration steps:
+### Application migration checklist
 
-1. Replace `zenoh::open(...)` with `MitiflowDomain::builder(id)`.
-2. Pick a `TransportProfile` (usually `LocalIsolated` for tests, `Client` or
-`PeerMesh` for production).
-3. Replace literal `EventBusConfig::builder("...")` with
-`domain.event_bus_config("topic")`.
-4. Replace `session.close()` with `domain.shutdown().await`.
-5. If you previously used `myapp/events` as a shared prefix across multiple
-sessions, give them the same `DomainId` and namespace so the derived prefixes
-match.
+1. Replace `zenoh::open(...)` with `MitiflowDomain::builder(id).open().await?`.
+2. Pick a `TransportProfile` only when the default is not right:
+   - default / tests / single-process demos: `LocalIsolated`
+   - production router fleet: `Client { connect }`
+   - production brokerless mesh: `PeerMesh { connect }`
+   - opt-in Zenoh discovery: `Ambient`
+3. Replace literal `EventBusConfig::builder("...")` calls with
+   `domain.event_bus_config("topic")?` when you want domain-derived prefixes.
+4. Pass `domain.session()` to publishers, subscribers, event stores, and
+   partition managers.
+5. Drop publishers/subscribers/stores before calling `domain.shutdown().await?`.
+
+### Prefix compatibility
+
+`domain.event_bus_config("events")?` is not byte-for-byte equivalent to a legacy
+literal prefix such as `"myapp/events"`. With the default namespace, it produces:
+
+```text
+mitiflow/{domain_id}/topics/{topic}
+```
+
+For example, `MitiflowDomain::builder("myapp")` plus
+`event_bus_config("events")` produces `mitiflow/myapp/topics/events`.
+
+If you must keep an existing wire prefix byte-for-byte during migration, keep
+the literal `EventBusConfig::builder(...)` temporarily and only migrate session
+setup first:
+
+```rust,no_run
+let domain = MitiflowDomain::builder("myapp").open().await?;
+let config = EventBusConfig::builder("myapp/events").build()?;
+let publisher = EventPublisher::new(domain.session(), config).await?;
+```
+
+Move to `domain.event_bus_config(...)` once all participants can accept the new
+domain-derived prefix.
+
+All participants that should communicate must agree on the same namespace,
+topic suffix, and transport connectivity. Two `LocalIsolated` domains with the
+same namespace still cannot see each other automatically because scouting is
+disabled.
+
+### Test migration
+
+Tests should not open raw Zenoh defaults. Use `isolated_for_test`, keep test
+names unique, and use Tokio's multi-thread runtime:
+
+```rust,no_run
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn publishes_event_in_isolated_domain() -> mitiflow::Result<()> {
+    let domain = MitiflowDomain::isolated_for_test("publishes_event").await?;
+    let config = domain.event_bus_config("events")?.build()?;
+
+    let subscriber = EventSubscriber::new(domain.session(), config.clone()).await?;
+    let publisher = EventPublisher::new(domain.session(), config).await?;
+
+    drop(publisher);
+    drop(subscriber);
+    domain.shutdown().await?;
+    Ok(())
+}
+```
+
+For in-process integration tests that need more than one session, open one
+parent domain and connect children with `parent.join_isolated().await?`. The
+child keeps the same namespace and uses a `Client` transport to the parent's
+localhost endpoint. For separate OS processes, pass the parent's endpoint to the
+child process and configure that child with `Client` / `MITIFLOW_TRANSPORT_CONNECT`.
+
+### Binary and YAML migration
+
+For `mitiflow storage`, `mitiflow orchestrator`, `mitiflow ctl`, and the unified
+CLI, the runtime path is `DomainRuntimeConfig`: YAML values are merged with
+environment variables and optional CLI transport overrides.
+
+```yaml
+domain:
+  id: my-domain
+  namespace: myapp/prod
+transport:
+  profile: client
+  connect:
+    - "tcp/zenoh-router:7447"
+```
+
+Equivalent environment override:
+
+```bash
+MITIFLOW_DOMAIN_ID=my-domain \
+MITIFLOW_DOMAIN_NAMESPACE=myapp/prod \
+MITIFLOW_TRANSPORT_PROFILE=client \
+MITIFLOW_TRANSPORT_CONNECT=tcp/zenoh-router:7447 \
+  mitiflow storage --config storage.yaml
+```
+
+`client` and `peer-mesh` require at least one `connect` endpoint after YAML,
+environment, and CLI overrides are resolved.
+
+### Durable single-store demos
+
+Single-store durable demos and local benchmarks use one in-process store. When
+migrating those demos, keep `.num_partitions(1)` on the event bus config so the
+publisher waits for the same partition the store is serving:
+
+```rust,no_run
+let config = domain.event_bus_config("orders")?
+    // Single-store demo only. Multi-partition deployments need stores for each partition.
+    .num_partitions(1)
+    .watermark_interval(Duration::from_millis(50))
+    .durable_timeout(Duration::from_secs(5))
+    .build()?;
+```
+
+Production multi-partition durability should be configured with matching storage
+agents for every partition rather than relying on the single-store demo shape.
+
+### Migration pitfalls
+
+- `LocalIsolated` is intentionally private; use `join_isolated`, `Client`,
+  `PeerMesh`, or `Ambient` when multiple processes need to communicate.
+- `Ambient` may discover unexpected routers or peers and logs
+  `transport.profile=Ambient` as a warning.
+- `DomainId` and `Namespace` validation rejects `*`, `$`, whitespace, empty
+  segments, and other invalid key-expression shapes.
+- A namespace change is a wire-prefix change. Subscribers on the old prefix will
+  not receive events on the new derived prefix.
 
 ---
 
@@ -399,4 +527,3 @@ warning.
 - Configuration flows: env → YAML → defaults. `client` and `peer-mesh` require
 non-empty `connect`.
 - Startup logs expose transport, endpoints, and scouting state for every domain.
-
