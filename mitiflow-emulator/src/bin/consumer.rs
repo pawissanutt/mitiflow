@@ -36,32 +36,10 @@ async fn main() -> anyhow::Result<()> {
     let zenoh_cfg: ZenohRoleConfig = decode_config(&zenoh_b64)?;
     let config: ConsumerRoleConfig = decode_config(&config_b64)?;
 
-    // Build zenoh config.
-    let mut zc = zenoh::Config::default();
+    let zc = zenoh_cfg
+        .to_zenoh_config()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let me = |e: Box<dyn std::error::Error + Send + Sync>| anyhow::anyhow!("{e}");
-    match zenoh_cfg.mode.as_str() {
-        "client" => {
-            zc.insert_json5("mode", r#""client""#).map_err(&me)?;
-        }
-        "router" => {
-            zc.insert_json5("mode", r#""router""#).map_err(&me)?;
-        }
-        _ => {
-            zc.insert_json5("mode", r#""peer""#).map_err(&me)?;
-        }
-    }
-    if !zenoh_cfg.listen.is_empty() {
-        let json = serde_json::to_string(&zenoh_cfg.listen)?;
-        zc.insert_json5("listen/endpoints", &json).map_err(&me)?;
-    }
-    if !zenoh_cfg.connect.is_empty() {
-        let json = serde_json::to_string(&zenoh_cfg.connect)?;
-        zc.insert_json5("connect/endpoints", &json).map_err(&me)?;
-    }
-    if zenoh_cfg.timestamping_enabled {
-        zc.insert_json5("timestamping/enabled", "true")
-            .map_err(&me)?;
-    }
 
     let session = zenoh::open(zc).await.map_err(&me)?;
 
