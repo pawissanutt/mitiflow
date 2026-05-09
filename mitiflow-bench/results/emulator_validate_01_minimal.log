@@ -1,4 +1,0 @@
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.18s
-     Running `target/debug/mitiflow-emulator validate mitiflow-emulator/topologies/01_minimal.yaml`
-Topology is valid with 1 warning(s):
-  warning: topic "events" has no storage_agent — events will not be persisted
