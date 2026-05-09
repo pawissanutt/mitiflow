@@ -36,6 +36,8 @@ impl AgentProcess {
         key_prefix: &str,
         num_partitions: u32,
         replication_factor: u32,
+        domain_id: &str,
+        transport_connect: &str,
     ) -> Self {
         let data_dir = tempfile::tempdir().unwrap();
         let child = Command::new(agent_binary())
@@ -47,6 +49,9 @@ impl AgentProcess {
                 "MITIFLOW_REPLICATION_FACTOR",
                 replication_factor.to_string(),
             )
+            .env("MITIFLOW_DOMAIN_ID", domain_id)
+            .env("MITIFLOW_TRANSPORT_PROFILE", "client")
+            .env("MITIFLOW_TRANSPORT_CONNECT", transport_connect)
             .env("RUST_LOG", "info")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -91,15 +96,19 @@ pub struct SmokeCluster {
     pub num_partitions: u32,
     pub replication_factor: u32,
     pub agents: Vec<AgentProcess>,
+    domain_id: String,
+    transport_connect: String,
 }
 
 impl SmokeCluster {
-    pub fn new(test_name: &str, num_partitions: u32, rf: u32) -> Self {
+    pub fn new(test_name: &str, num_partitions: u32, rf: u32, transport_connect: String) -> Self {
         Self {
             key_prefix: format!("smoke/{test_name}"),
             num_partitions,
             replication_factor: rf,
             agents: Vec::new(),
+            domain_id: format!("smoke-{}", test_name.replace('_', "-")),
+            transport_connect,
         }
     }
 
@@ -110,6 +119,8 @@ impl SmokeCluster {
             &self.key_prefix,
             self.num_partitions,
             self.replication_factor,
+            &self.domain_id,
+            &self.transport_connect,
         );
         self.agents.push(agent);
     }
